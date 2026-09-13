@@ -5,11 +5,19 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# MediaPipe/OpenCV need these for image decoding even in headless mode.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 curl \
+    && rm -rf /var/lib/apt/lists/*
+
 # Dependencies first so source edits don't invalidate the install layer.
-# Note: MediaPipe/OpenCV will additionally need libgl1 and libglib2.0-0 via
-# apt — omitted until the classifier work actually pulls them in.
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Face landmark model asset — not committed to git (binary blob), fetched
+# here and in local dev via scripts/download_models.sh.
+RUN mkdir -p app/vision/models && curl -sL -o app/vision/models/face_landmarker.task \
+    "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
 
 COPY . .
 

@@ -1,4 +1,5 @@
 import { HealthCheck } from "@/app/components/health-check";
+import { PhotoUpload } from "@/app/components/photo-upload";
 
 export default function Home() {
   return (
@@ -9,6 +10,8 @@ export default function Home() {
           Find the colors that suit you.
         </p>
       </div>
+
+      <PhotoUpload />
 
       <HealthCheck />
     </main>

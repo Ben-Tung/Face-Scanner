@@ -26,6 +26,15 @@ out/
 # Python tooling
 .pytest_cache/
 
+# Downloaded model assets (fetched by backend/scripts/download_models.sh)
+backend/app/vision/models/*.task
+
 # Next.js build output lives under frontend/
 frontend/.next/
 frontend/out/
+
+# Real photos used for manual/automated anchor-placement verification -
+# personal and possibly copyrighted (e.g. editorial/stock photos), never
+# committed. See backend/tests/test_anchor_placement_real_photos.py.
+/testPictures/
+backend/tests/fixtures/photos/
