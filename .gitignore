@@ -22,3 +22,10 @@ out/
 # Supabase local dev
 .supabase/
 
+
+# Python tooling
+.pytest_cache/
+
+# Next.js build output lives under frontend/
+frontend/.next/
+frontend/out/

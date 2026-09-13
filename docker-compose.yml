@@ -1,0 +1,52 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-palette}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-palette}
+      POSTGRES_DB: ${POSTGRES_DB:-palette}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-palette} -d ${POSTGRES_DB:-palette}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: ./backend
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    environment:
+      ENVIRONMENT: development
+      CORS_ORIGINS: '["http://localhost:3000"]'
+      DATABASE_URL: postgresql://${POSTGRES_USER:-palette}:${POSTGRES_PASSWORD:-palette}@db:5432/${POSTGRES_DB:-palette}
+    volumes:
+      # Bind mount for uvicorn --reload. The anonymous volume keeps a host
+      # .venv from shadowing anything inside the image.
+      - ./backend:/app
+      - /app/.venv
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    environment:
+      # Read by the browser, so it points at the published host port.
+      NEXT_PUBLIC_API_URL: http://localhost:${BACKEND_PORT:-8000}
+    volumes:
+      # Anonymous volumes keep the image's node_modules and build cache from
+      # being shadowed by the host directory.
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
