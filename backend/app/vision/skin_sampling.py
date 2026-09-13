@@ -65,6 +65,7 @@ class SkinSampleResult:
     left_cheek_rgb: RGB | None = None
     right_cheek_rgb: RGB | None = None
     error: SampleFailureReason | None = None
+    anchors: AnchorPoints | None = None
 
 
 @dataclass(frozen=True)
@@ -212,6 +213,42 @@ def _face_bbox_area(points: np.ndarray) -> float:
     return float(width * height)
 
 
+def sample_at_anchors(image_bgr: np.ndarray, anchors: AnchorPoints) -> SkinSampleResult:
+    """Sample forehead/left-cheek/right-cheek patches at caller-supplied anchors.
+
+    Shared core of `sample_skin_regions` (anchors from face detection) and the
+    manual-adjustment recovery flow (anchors dragged by the user and resent
+    against the same photo bytes, since nothing here persists the image).
+    Always attaches `anchors` to the result, success or failure, so the
+    caller can echo back exactly which coordinates were used.
+    """
+    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+    image_lab = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2LAB)
+
+    forehead_rgb = sample_patch_rgb(image_rgb, image_lab, anchors.forehead, anchors.patch_half_size)
+    left_cheek_rgb = sample_patch_rgb(image_rgb, image_lab, anchors.left_cheek, anchors.patch_half_size)
+    right_cheek_rgb = sample_patch_rgb(image_rgb, image_lab, anchors.right_cheek, anchors.patch_half_size)
+
+    if forehead_rgb is None or left_cheek_rgb is None or right_cheek_rgb is None:
+        return SkinSampleResult(success=False, error="face_out_of_frame", anchors=anchors)
+
+    clipped_fractions = (
+        patch_clipped_fraction(image_rgb, anchors.forehead, anchors.patch_half_size),
+        patch_clipped_fraction(image_rgb, anchors.left_cheek, anchors.patch_half_size),
+        patch_clipped_fraction(image_rgb, anchors.right_cheek, anchors.patch_half_size),
+    )
+    if any(f is not None and f >= _CLIPPED_PIXEL_FRACTION_THRESHOLD for f in clipped_fractions):
+        return SkinSampleResult(success=False, error="patch_clipped", anchors=anchors)
+
+    return SkinSampleResult(
+        success=True,
+        forehead_rgb=forehead_rgb,
+        left_cheek_rgb=left_cheek_rgb,
+        right_cheek_rgb=right_cheek_rgb,
+        anchors=anchors,
+    )
+
+
 def sample_skin_regions(image_bgr: np.ndarray) -> SkinSampleResult:
     """Detect a face and median-sample forehead/left-cheek/right-cheek color.
 
@@ -237,26 +274,4 @@ def sample_skin_regions(image_bgr: np.ndarray) -> SkinSampleResult:
     largest_face = max(faces, key=_face_bbox_area)
 
     anchors = compute_anchor_points(largest_face)
-    image_lab = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2LAB)
-
-    forehead_rgb = sample_patch_rgb(image_rgb, image_lab, anchors.forehead, anchors.patch_half_size)
-    left_cheek_rgb = sample_patch_rgb(image_rgb, image_lab, anchors.left_cheek, anchors.patch_half_size)
-    right_cheek_rgb = sample_patch_rgb(image_rgb, image_lab, anchors.right_cheek, anchors.patch_half_size)
-
-    if forehead_rgb is None or left_cheek_rgb is None or right_cheek_rgb is None:
-        return SkinSampleResult(success=False, error="face_out_of_frame")
-
-    clipped_fractions = (
-        patch_clipped_fraction(image_rgb, anchors.forehead, anchors.patch_half_size),
-        patch_clipped_fraction(image_rgb, anchors.left_cheek, anchors.patch_half_size),
-        patch_clipped_fraction(image_rgb, anchors.right_cheek, anchors.patch_half_size),
-    )
-    if any(f is not None and f >= _CLIPPED_PIXEL_FRACTION_THRESHOLD for f in clipped_fractions):
-        return SkinSampleResult(success=False, error="patch_clipped")
-
-    return SkinSampleResult(
-        success=True,
-        forehead_rgb=forehead_rgb,
-        left_cheek_rgb=left_cheek_rgb,
-        right_cheek_rgb=right_cheek_rgb,
-    )
+    return sample_at_anchors(image_bgr, anchors)

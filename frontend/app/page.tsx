@@ -1,4 +1,3 @@
-import { HealthCheck } from "@/app/components/health-check";
 import { PhotoUpload } from "@/app/components/photo-upload";
 
 export default function Home() {
@@ -12,8 +11,6 @@ export default function Home() {
       </div>
 
       <PhotoUpload />
-
-      <HealthCheck />
     </main>
   );
 }

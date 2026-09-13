@@ -1,0 +1,241 @@
+from __future__ import annotations
+
+from typing import Literal
+
+import cv2
+import numpy as np
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
+from pydantic import BaseModel
+
+from app.analytics import log_event
+from app.palettes import SWATCHES_BY_SEASON
+from app.paragraph import generate_paragraph
+from app.vision.season_classifier import Season, classify_season
+from app.vision.skin_sampling import AnchorPoints, sample_at_anchors, sample_skin_regions
+
+router = APIRouter(prefix="/api", tags=["scan"])
+
+_MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB — generous for a phone camera selfie
+
+_SAMPLE_ERROR_MESSAGES: dict[str, str] = {
+    "no_face_detected": "We couldn't find a face in that photo. Try again with your face centered and well-lit.",
+    "face_out_of_frame": "Your face is too close to the edge of the frame. Center your face and try again.",
+    "patch_clipped": (
+        "That photo is too bright in places — drag the boxes below to fine-tune "
+        "where we sample, or retake it in softer light."
+    ),
+}
+_CLASSIFY_ERROR_MESSAGES: dict[str, str] = {
+    "inconsistent_patches": (
+        "Lighting looks uneven across your face — drag the boxes below to adjust, "
+        "or retake the photo in even light."
+    ),
+}
+
+
+class SwatchResponse(BaseModel):
+    name: str
+    hex: str
+
+
+class ScanResponse(BaseModel):
+    season: Season
+    swatches: list[SwatchResponse]
+    paragraph: str | None = None
+
+
+class PatchPoint(BaseModel):
+    x: float
+    y: float
+
+
+class PatchAnchorsPayload(BaseModel):
+    forehead: PatchPoint
+    left_cheek: PatchPoint
+    right_cheek: PatchPoint
+    patch_half_size: float
+
+
+class ScanImage(BaseModel):
+    width: int
+    height: int
+
+
+class LowConfidenceDetail(BaseModel):
+    reason: Literal["patch_clipped", "inconsistent_patches"]
+    message: str
+    patches: PatchAnchorsPayload
+    image: ScanImage
+
+
+async def _read_and_decode_photo(photo: UploadFile) -> np.ndarray:
+    """Validate, read, and decode an upload into a BGR array.
+
+    Never retains the uploaded photo beyond the caller's request — nothing
+    here writes it to disk or a database (see CLAUDE.md's retention rule).
+    """
+    if photo.content_type and not photo.content_type.startswith("image/"):
+        raise HTTPException(status_code=422, detail="Please upload an image file.")
+
+    contents = await photo.read()
+    if not contents:
+        raise HTTPException(status_code=422, detail="Please upload an image file.")
+    if len(contents) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=422, detail="That photo is too large (max 10MB). Try a smaller photo.")
+
+    image_bgr = cv2.imdecode(np.frombuffer(contents, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if image_bgr is None:
+        raise HTTPException(status_code=422, detail="We couldn't read that image. Try a different photo.")
+    return image_bgr
+
+
+def _swatches_for(season: Season) -> list[SwatchResponse]:
+    return [SwatchResponse(name=s.name, hex=s.hex) for s in SWATCHES_BY_SEASON[season]]
+
+
+def _patch_anchors_payload(anchors: AnchorPoints) -> PatchAnchorsPayload:
+    return PatchAnchorsPayload(
+        forehead=PatchPoint(x=float(anchors.forehead[0]), y=float(anchors.forehead[1])),
+        left_cheek=PatchPoint(x=float(anchors.left_cheek[0]), y=float(anchors.left_cheek[1])),
+        right_cheek=PatchPoint(x=float(anchors.right_cheek[0]), y=float(anchors.right_cheek[1])),
+        patch_half_size=anchors.patch_half_size,
+    )
+
+
+def _low_confidence_detail(
+    reason: Literal["patch_clipped", "inconsistent_patches"],
+    message: str,
+    anchors: AnchorPoints,
+    width: int,
+    height: int,
+) -> dict:
+    return LowConfidenceDetail(
+        reason=reason,
+        message=message,
+        patches=_patch_anchors_payload(anchors),
+        image=ScanImage(width=width, height=height),
+    ).model_dump()
+
+
+@router.post("/scan", response_model=ScanResponse)
+async def scan(background_tasks: BackgroundTasks, photo: UploadFile = File(...)) -> ScanResponse:
+    """Detect a face in the uploaded photo and classify its color season.
+
+    Never retains the uploaded photo beyond this request — nothing here
+    writes it to disk or a database (see CLAUDE.md's retention rule).
+    """
+    image_bgr = await _read_and_decode_photo(photo)
+
+    # Called directly, not via background_tasks: FastAPI only attaches queued
+    # background tasks to a successful Response, never to the response an
+    # HTTPException raised further down would build — so a backgrounded call
+    # here would silently never fire on a rejected/failed scan. log_event()
+    # is itself try/except-wrapped and timeout-bounded, so this stays cheap.
+    log_event("scan_started")
+
+    height, width = image_bgr.shape[:2]
+
+    sample = sample_skin_regions(image_bgr)
+    if not sample.success:
+        if sample.error == "patch_clipped":
+            assert sample.anchors is not None  # patch_clipped always carries anchors
+            log_event("scan_low_confidence", {"reason": "patch_clipped"})
+            raise HTTPException(
+                status_code=422,
+                detail=_low_confidence_detail(
+                    "patch_clipped", _SAMPLE_ERROR_MESSAGES["patch_clipped"], sample.anchors, width, height
+                ),
+            )
+        raise HTTPException(status_code=422, detail=_SAMPLE_ERROR_MESSAGES[sample.error])
+
+    result = classify_season(sample.forehead_rgb, sample.left_cheek_rgb, sample.right_cheek_rgb)
+    if not result.success:
+        assert sample.anchors is not None  # sampling succeeded, so anchors are always set
+        log_event("scan_low_confidence", {"reason": "inconsistent_patches"})
+        raise HTTPException(
+            status_code=422,
+            detail=_low_confidence_detail(
+                "inconsistent_patches",
+                _CLASSIFY_ERROR_MESSAGES["inconsistent_patches"],
+                sample.anchors,
+                width,
+                height,
+            ),
+        )
+
+    season = result.classification.season
+    paragraph = generate_paragraph(result.classification, SWATCHES_BY_SEASON[season])
+    background_tasks.add_task(log_event, "scan_completed", {"season": season})
+    return ScanResponse(season=season, swatches=_swatches_for(season), paragraph=paragraph)
+
+
+@router.post("/scan/manual", response_model=ScanResponse)
+async def scan_manual(
+    background_tasks: BackgroundTasks,
+    photo: UploadFile = File(...),
+    forehead_x: float = Form(...),
+    forehead_y: float = Form(...),
+    left_cheek_x: float = Form(...),
+    left_cheek_y: float = Form(...),
+    right_cheek_x: float = Form(...),
+    right_cheek_y: float = Form(...),
+    patch_half_size: float = Form(...),
+) -> ScanResponse:
+    """Re-classify against manually adjusted patch coordinates.
+
+    Recovery path for a low-confidence /scan result: the caller resends the
+    same photo bytes (nothing here persists the image either, same as
+    /scan) alongside forehead/cheek centers the user dragged into place.
+    """
+    image_bgr = await _read_and_decode_photo(photo)
+    height, width = image_bgr.shape[:2]
+
+    coords = {
+        "forehead": (forehead_x, forehead_y),
+        "left_cheek": (left_cheek_x, left_cheek_y),
+        "right_cheek": (right_cheek_x, right_cheek_y),
+    }
+    if patch_half_size <= 0 or any(
+        not (0 <= x <= width and 0 <= y <= height) for x, y in coords.values()
+    ):
+        raise HTTPException(status_code=400, detail="Those patch positions are out of bounds for this image.")
+
+    anchors = AnchorPoints(
+        forehead=np.array([forehead_x, forehead_y]),
+        left_cheek=np.array([left_cheek_x, left_cheek_y]),
+        right_cheek=np.array([right_cheek_x, right_cheek_y]),
+        patch_half_size=patch_half_size,
+    )
+
+    log_event("scan_manual_started")
+
+    sample = sample_at_anchors(image_bgr, anchors)
+    if not sample.success:
+        if sample.error == "patch_clipped":
+            log_event("scan_low_confidence", {"reason": "patch_clipped", "manual": True})
+            raise HTTPException(
+                status_code=422,
+                detail=_low_confidence_detail(
+                    "patch_clipped", _SAMPLE_ERROR_MESSAGES["patch_clipped"], anchors, width, height
+                ),
+            )
+        # face_out_of_frame is unreachable in practice here: the bounds check
+        # above guarantees every patch overlaps the image by at least one
+        # pixel, which is all sample_patch_rgb needs to return a value. Kept
+        # only for defensive completeness.
+        raise HTTPException(status_code=422, detail=_SAMPLE_ERROR_MESSAGES[sample.error])
+
+    result = classify_season(sample.forehead_rgb, sample.left_cheek_rgb, sample.right_cheek_rgb)
+    if not result.success:
+        log_event("scan_low_confidence", {"reason": "inconsistent_patches", "manual": True})
+        raise HTTPException(
+            status_code=422,
+            detail=_low_confidence_detail(
+                "inconsistent_patches", _CLASSIFY_ERROR_MESSAGES["inconsistent_patches"], anchors, width, height
+            ),
+        )
+
+    season = result.classification.season
+    paragraph = generate_paragraph(result.classification, SWATCHES_BY_SEASON[season])
+    background_tasks.add_task(log_event, "scan_manual_completed", {"season": season})
+    return ScanResponse(season=season, swatches=_swatches_for(season), paragraph=paragraph)

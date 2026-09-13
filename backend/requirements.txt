@@ -8,6 +8,16 @@ mediapipe~=1.0
 opencv-python-headless~=5.0
 numpy~=2.5
 
+# Multipart form parsing — required by FastAPI's UploadFile/File()
+python-multipart~=0.0
+
+# Best-effort analytics event logging (see CLAUDE.md's logging convention)
+psycopg[binary]~=3.2
+
+# AI paragraph generation only — never for face/season classification (see
+# CLAUDE.md's critical rule)
+anthropic~=1.5
+
 # Test-only
 pytest~=8.3
 httpx~=0.28

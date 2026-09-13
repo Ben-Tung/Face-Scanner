@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     # yet — the database is wired up when the first feature needs it.
     database_url: str | None = None
 
+    # Best-effort: app/paragraph.py no-ops (returns None) when this is unset.
+    anthropic_api_key: str | None = None
+
 
 @lru_cache
 def get_settings() -> Settings:

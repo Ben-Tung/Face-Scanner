@@ -2,8 +2,10 @@ import numpy as np
 import pytest
 
 from app.vision.skin_sampling import (
+    AnchorPoints,
     compute_anchor_points,
     patch_clipped_fraction,
+    sample_at_anchors,
     sample_patch_rgb,
     sample_skin_regions,
 )
@@ -143,3 +145,55 @@ def test_sample_skin_regions_reports_no_face_detected_for_blank_image():
 
     assert result.success is False
     assert result.error == "no_face_detected"
+
+
+def test_sample_at_anchors_returns_success_for_well_lit_patches():
+    image_bgr = np.full((60, 60, 3), 150, dtype=np.uint8)
+    anchors = AnchorPoints(
+        forehead=np.array([30.0, 15.0]),
+        left_cheek=np.array([15.0, 40.0]),
+        right_cheek=np.array([45.0, 40.0]),
+        patch_half_size=8.0,
+    )
+
+    result = sample_at_anchors(image_bgr, anchors)
+
+    assert result.success is True
+    assert result.forehead_rgb == (150, 150, 150)
+    assert result.left_cheek_rgb == (150, 150, 150)
+    assert result.right_cheek_rgb == (150, 150, 150)
+    assert result.anchors is anchors
+
+
+def test_sample_at_anchors_reports_patch_clipped():
+    image_bgr = np.full((60, 60, 3), 150, dtype=np.uint8)
+    # Blow out the entire forehead patch to a clipped highlight.
+    image_bgr[7:24, 22:39] = 255
+    anchors = AnchorPoints(
+        forehead=np.array([30.0, 15.0]),
+        left_cheek=np.array([15.0, 40.0]),
+        right_cheek=np.array([45.0, 40.0]),
+        patch_half_size=8.0,
+    )
+
+    result = sample_at_anchors(image_bgr, anchors)
+
+    assert result.success is False
+    assert result.error == "patch_clipped"
+    assert result.anchors is anchors
+
+
+def test_sample_at_anchors_reports_face_out_of_frame_for_anchor_outside_image():
+    image_bgr = np.full((60, 60, 3), 150, dtype=np.uint8)
+    anchors = AnchorPoints(
+        forehead=np.array([-500.0, -500.0]),
+        left_cheek=np.array([15.0, 40.0]),
+        right_cheek=np.array([45.0, 40.0]),
+        patch_half_size=8.0,
+    )
+
+    result = sample_at_anchors(image_bgr, anchors)
+
+    assert result.success is False
+    assert result.error == "face_out_of_frame"
+    assert result.anchors is anchors
