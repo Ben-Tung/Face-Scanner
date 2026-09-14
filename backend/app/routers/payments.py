@@ -33,7 +33,7 @@ from app.scans_repo import (
     set_checkout_session,
     set_full_report_paragraph,
 )
-from app.schemas import SwatchResponse
+from app.schemas import SwatchResponse, to_swatch_responses
 from app.vision.season_classifier import Season
 
 logger = logging.getLogger(__name__)
@@ -75,10 +75,11 @@ class FullReportResponse(BaseModel):
 
 class ScanStateResponse(BaseModel):
     scan_id: str
-    season: str
+    season: Season
     swatches: list[SwatchResponse]
     paragraph: str | None
     paid: bool
+    price_cents: int
     full_report: FullReportResponse | None = None
 
 
@@ -95,10 +96,6 @@ def _parse_scan_id(scan_id: str) -> str:
 
 def _swatches_response(row: ScanRow) -> list[SwatchResponse]:
     return [SwatchResponse(**swatch) for swatch in row.swatches]
-
-
-def _to_swatch_responses(swatches: Sequence[Swatch]) -> list[SwatchResponse]:
-    return [SwatchResponse(name=s.name, hex=s.hex) for s in swatches]
 
 
 def _resolve_full_report_paragraph(
@@ -128,15 +125,15 @@ def _full_report_response(row: ScanRow) -> FullReportResponse:
 
     return FullReportResponse(
         palette=PaletteSectionResponse(
-            best=_to_swatch_responses(palette.best),
-            good=_to_swatch_responses(palette.good),
-            avoid=_to_swatch_responses(palette.avoid),
+            best=to_swatch_responses(palette.best),
+            good=to_swatch_responses(palette.good),
+            avoid=to_swatch_responses(palette.avoid),
         ),
         makeup=MakeupGuidanceResponse(
             foundation_undertone=guidance.makeup.foundation_undertone,
             foundation_tip=guidance.makeup.foundation_tip,
-            lip_shades=_to_swatch_responses(guidance.makeup.lip_shades),
-            blush_shades=_to_swatch_responses(guidance.makeup.blush_shades),
+            lip_shades=to_swatch_responses(guidance.makeup.lip_shades),
+            blush_shades=to_swatch_responses(guidance.makeup.blush_shades),
         ),
         jewelry=JewelryGuidanceResponse(
             metal=guidance.jewelry.metal,
@@ -158,6 +155,7 @@ def _scan_state_response(row: ScanRow, paid: bool) -> ScanStateResponse:
         swatches=swatches,
         paragraph=row.paragraph,
         paid=paid,
+        price_cents=_FULL_REPORT_PRICE_CENTS,
         full_report=full_report,
     )
 

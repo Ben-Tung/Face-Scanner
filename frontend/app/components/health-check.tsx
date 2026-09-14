@@ -4,6 +4,8 @@ import { useEffect, useState } from "react";
 
 import { apiUrl } from "@/lib/api";
 
+import { CARD_CLASS } from "./ui";
+
 type Health = {
   status: string;
   service: string;
@@ -44,7 +46,7 @@ export function HealthCheck() {
   }, []);
 
   return (
-    <div className="rounded-xl border border-black/10 p-4 text-sm dark:border-white/15">
+    <div className={`${CARD_CLASS} text-sm`}>
       {state.kind === "checking" && (
         <p className="text-black/60 dark:text-white/60">Checking API…</p>
       )}

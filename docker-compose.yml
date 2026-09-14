@@ -17,12 +17,16 @@ services:
 
   backend:
     build: ./backend
+    # Dev-only autoreload override — the image's own default CMD omits
+    # --reload so a deployed image never runs with it.
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     environment:
       ENVIRONMENT: development
       CORS_ORIGINS: '["http://localhost:3000"]'
       DATABASE_URL: postgresql://${POSTGRES_USER:-palette}:${POSTGRES_PASSWORD:-palette}@db:5432/${POSTGRES_DB:-palette}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
       # Read by the backend to build Stripe success_url/cancel_url, so it

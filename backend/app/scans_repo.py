@@ -17,6 +17,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from app.config import get_settings
+from app.vision.season_classifier import Season
 
 _CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS scans (
@@ -38,7 +39,7 @@ _schema_ready = False
 @dataclass(frozen=True)
 class ScanRow:
     id: str
-    season: str
+    season: Season
     swatches: list[dict[str, Any]]
     paragraph: str | None
     paid: bool
@@ -74,7 +75,7 @@ def _ensure_schema(conn: psycopg.Connection) -> None:
         _schema_ready = True
 
 
-def create_scan(scan_id: str, season: str, swatches: list[dict[str, Any]], paragraph: str | None) -> None:
+def create_scan(scan_id: str, season: Season, swatches: list[dict[str, Any]], paragraph: str | None) -> None:
     with _connect() as conn:
         _ensure_schema(conn)
         conn.execute(

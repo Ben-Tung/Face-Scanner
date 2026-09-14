@@ -13,7 +13,7 @@ from app.analytics import log_event
 from app.palettes import SWATCHES_BY_SEASON
 from app.paragraph import generate_paragraph
 from app.scans_repo import create_scan
-from app.schemas import SwatchResponse
+from app.schemas import SwatchResponse, to_swatch_responses
 from app.vision.season_classifier import Season, classify_season
 from app.vision.skin_sampling import AnchorPoints, sample_at_anchors, sample_skin_regions
 
@@ -89,10 +89,6 @@ async def _read_and_decode_photo(photo: UploadFile) -> np.ndarray:
     if image_bgr is None:
         raise HTTPException(status_code=422, detail="We couldn't read that image. Try a different photo.")
     return image_bgr
-
-
-def _swatches_for(season: Season) -> list[SwatchResponse]:
-    return [SwatchResponse(name=s.name, hex=s.hex) for s in SWATCHES_BY_SEASON[season]]
 
 
 def _persist_scan(season: Season, swatches: list[SwatchResponse], paragraph: str | None) -> str:
@@ -184,7 +180,7 @@ async def scan(background_tasks: BackgroundTasks, photo: UploadFile = File(...))
         )
 
     season = result.classification.season
-    swatches = _swatches_for(season)
+    swatches = to_swatch_responses(SWATCHES_BY_SEASON[season])
     paragraph = generate_paragraph(result.classification, SWATCHES_BY_SEASON[season])
     scan_id = _persist_scan(season, swatches, paragraph)
     background_tasks.add_task(log_event, "scan_completed", {"season": season, "scan_id": scan_id})
@@ -258,7 +254,7 @@ async def scan_manual(
         )
 
     season = result.classification.season
-    swatches = _swatches_for(season)
+    swatches = to_swatch_responses(SWATCHES_BY_SEASON[season])
     paragraph = generate_paragraph(result.classification, SWATCHES_BY_SEASON[season])
     scan_id = _persist_scan(season, swatches, paragraph)
     background_tasks.add_task(

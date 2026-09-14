@@ -55,6 +55,7 @@ export type ScanState = {
   swatches: ScanSwatch[];
   paragraph: string | null;
   paid: boolean;
+  priceCents: number;
   fullReport: FullReport | null;
 };
 
@@ -224,6 +225,7 @@ type ScanStateBody = {
   swatches: ScanSwatch[];
   paragraph: string | null;
   paid: boolean;
+  price_cents: number;
   full_report: FullReportBody | null;
 };
 
@@ -271,6 +273,7 @@ export async function getScan(scanId: string, sessionId?: string): Promise<ScanS
     swatches: body.swatches,
     paragraph: body.paragraph,
     paid: body.paid,
+    priceCents: body.price_cents,
     fullReport: body.full_report ? mapFullReport(body.full_report) : null,
   };
 }

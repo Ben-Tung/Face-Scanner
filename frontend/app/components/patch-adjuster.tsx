@@ -4,6 +4,8 @@ import { useRef, useState } from "react";
 
 import type { PatchAnchors, PatchPoint, ScanImageInfo } from "@/lib/api";
 
+import { PRIMARY_BUTTON_CLASS } from "./ui";
+
 type PatchKey = "forehead" | "leftCheek" | "rightCheek";
 
 const PATCH_LABELS: Record<PatchKey, string> = {
@@ -154,7 +156,7 @@ export function PatchAdjuster({
         <button
           type="button"
           onClick={() => onSubmit(patches)}
-          className="w-full rounded-xl bg-black px-4 py-3 text-sm font-medium text-white dark:bg-white dark:text-black"
+          className={PRIMARY_BUTTON_CLASS}
         >
           Rescan
         </button>

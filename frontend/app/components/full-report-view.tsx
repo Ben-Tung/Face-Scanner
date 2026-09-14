@@ -1,7 +1,8 @@
 import type { FullReport, ScanSwatch } from "@/lib/api";
 import { ColorChip } from "./color-chip";
+import { CARD_CLASS as BASE_CARD_CLASS } from "./ui";
 
-const CARD_CLASS = "space-y-3 rounded-xl border border-black/10 p-4 dark:border-white/15";
+const CARD_CLASS = `space-y-3 ${BASE_CARD_CLASS}`;
 const SUBLABEL_CLASS = "text-xs font-medium text-black/50 dark:text-white/50";
 
 function ChipRow({ swatches, size = "md", muted = false }: { swatches: ScanSwatch[]; size?: "sm" | "md" | "lg"; muted?: boolean }) {

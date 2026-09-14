@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { HealthCheck } from "@/app/components/health-check";
 import { PatchAdjuster } from "@/app/components/patch-adjuster";
+import { CARD_CLASS, PRIMARY_BUTTON_CLASS, SPINNER_CLASS } from "@/app/components/ui";
 import {
   LowConfidenceScanError,
   ScanError,
@@ -14,6 +15,10 @@ import {
   type PatchAnchors,
   type ScanImageInfo,
 } from "@/lib/api";
+
+// Dev/docker-compose wiring check only (see README) — never render backend
+// internals (service/version/environment) to real users.
+const SHOW_HEALTH_CHECK = process.env.NODE_ENV !== "production";
 
 const LIGHTING_TIPS = [
   "Face a window in daylight — indirect light, not direct sun on your face",
@@ -98,7 +103,7 @@ function ScanningOverlay({
         className="h-full w-full scale-105 object-cover opacity-40 blur-sm"
       />
       <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-6 text-center">
-        <span className="h-8 w-8 animate-spin rounded-full border-2 border-black/20 border-t-black dark:border-white/20 dark:border-t-white" />
+        <span className={SPINNER_CLASS} />
         {statusMessage ? (
           <p className="animate-fade-in text-sm font-medium" aria-live="polite">
             {statusMessage}
@@ -194,7 +199,7 @@ export function PhotoUpload() {
 
       {state.kind === "empty" && (
         <div className="space-y-4">
-          <div className="rounded-xl border border-black/10 p-4 dark:border-white/15">
+          <div className={CARD_CLASS}>
             <p className="text-sm font-medium">Before you scan</p>
             <ul className="mt-2 space-y-1.5 text-sm text-black/60 dark:text-white/60">
               {LIGHTING_TIPS.map((tip) => (
@@ -211,12 +216,12 @@ export function PhotoUpload() {
           <button
             type="button"
             onClick={() => inputRef.current?.click()}
-            className="w-full rounded-xl bg-black px-4 py-3 text-sm font-medium text-white dark:bg-white dark:text-black"
+            className={PRIMARY_BUTTON_CLASS}
           >
             Take or choose a selfie
           </button>
 
-          <HealthCheck />
+          {SHOW_HEALTH_CHECK && <HealthCheck />}
         </div>
       )}
 
@@ -248,7 +253,7 @@ export function PhotoUpload() {
           <button
             type="button"
             onClick={() => inputRef.current?.click()}
-            className="w-full rounded-xl bg-black px-4 py-3 text-sm font-medium text-white dark:bg-white dark:text-black"
+            className={PRIMARY_BUTTON_CLASS}
           >
             Try another photo
           </button>

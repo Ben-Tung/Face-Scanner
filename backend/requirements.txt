@@ -1,5 +1,6 @@
 fastapi~=0.115
 uvicorn[standard]~=0.34
+pydantic~=2.7
 pydantic-settings~=2.7
 
 # Face detection / skin-tone sampling (deterministic, not an LLM call — see

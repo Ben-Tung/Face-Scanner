@@ -14,6 +14,7 @@ import {
 } from "@/lib/api";
 import { ColorChip } from "./color-chip";
 import { FullReportView } from "./full-report-view";
+import { PRIMARY_BUTTON_CLASS, SPINNER_CLASS } from "./ui";
 
 type ViewState =
   | { kind: "loading" }
@@ -94,10 +95,7 @@ export function ScanResultView() {
   if (state.kind === "loading") {
     return (
       <div className="flex justify-center py-12">
-        <span
-          aria-hidden
-          className="h-8 w-8 animate-spin rounded-full border-2 border-black/20 border-t-black dark:border-white/20 dark:border-t-white"
-        />
+        <span aria-hidden className={SPINNER_CLASS} />
       </div>
     );
   }
@@ -139,9 +137,11 @@ export function ScanResultView() {
             type="button"
             onClick={handleUnlock}
             disabled={isRedirecting}
-            className="w-full rounded-xl bg-black px-4 py-3 text-sm font-medium text-white disabled:opacity-60 dark:bg-white dark:text-black"
+            className={PRIMARY_BUTTON_CLASS}
           >
-            {isRedirecting ? "Redirecting to checkout…" : "Unlock full report — $2.99"}
+            {isRedirecting
+              ? "Redirecting to checkout…"
+              : `Unlock full report — $${(scan.priceCents / 100).toFixed(2)}`}
           </button>
         </>
       )}
