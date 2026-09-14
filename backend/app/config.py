@@ -22,6 +22,17 @@ class Settings(BaseSettings):
     # Best-effort: app/paragraph.py no-ops (returns None) when this is unset.
     anthropic_api_key: str | None = None
 
+    # Stripe Checkout for the full-report unlock. Left unset means payments
+    # are disabled: app/routers/payments.py returns a clear 500 rather than
+    # letting the Stripe SDK fail with an opaque auth error.
+    stripe_secret_key: str | None = None
+    stripe_webhook_secret: str | None = None
+
+    # Where the Next.js frontend is served — used to build Stripe Checkout
+    # success_url/cancel_url. Has a real default (unlike the secrets above)
+    # since Checkout needs *some* value even in a bare local run.
+    frontend_base_url: str = "http://localhost:3000"
+
 
 @lru_cache
 def get_settings() -> Settings:

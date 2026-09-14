@@ -13,9 +13,25 @@ export type ScanSwatch = {
 };
 
 export type ScanResult = {
+  scanId: string;
   season: Season;
   swatches: ScanSwatch[];
   paragraph: string | null;
+};
+
+export type FullReport = {
+  swatches: ScanSwatch[];
+  paragraph: string | null;
+  note: string;
+};
+
+export type ScanState = {
+  scanId: string;
+  season: Season;
+  swatches: ScanSwatch[];
+  paragraph: string | null;
+  paid: boolean;
+  fullReport: FullReport | null;
 };
 
 export type PatchPoint = {
@@ -38,6 +54,12 @@ export type ScanImageInfo = {
 export type LowConfidenceReason = "patch_clipped" | "inconsistent_patches";
 
 export class ScanError extends Error {}
+
+/** A scan id that doesn't exist (bad link, or the scan was never
+ * persisted) — kept distinct from ScanError so the result page can show a
+ * friendlier "we couldn't find that scan" message instead of a generic
+ * error. */
+export class ScanNotFoundError extends ScanError {}
 
 /** A recoverable low-confidence result: carries the auto-detected patch
  * coordinates so the caller can offer manual adjustment instead of just
@@ -98,6 +120,22 @@ async function parseScanErrorBody(response: Response): Promise<Error> {
   return new ScanError(fallback);
 }
 
+type ScanResultBody = {
+  scan_id: string;
+  season: Season;
+  swatches: ScanSwatch[];
+  paragraph: string | null;
+};
+
+function mapScanResult(body: ScanResultBody): ScanResult {
+  return {
+    scanId: body.scan_id,
+    season: body.season,
+    swatches: body.swatches,
+    paragraph: body.paragraph,
+  };
+}
+
 /** Upload a selfie to the backend and get back its color season + example swatches. */
 export async function scanPhoto(file: File): Promise<ScanResult> {
   const formData = new FormData();
@@ -114,7 +152,7 @@ export async function scanPhoto(file: File): Promise<ScanResult> {
     throw await parseScanErrorBody(response);
   }
 
-  return (await response.json()) as ScanResult;
+  return mapScanResult((await response.json()) as ScanResultBody);
 }
 
 /** Re-run classification against manually adjusted patch coordinates, for
@@ -140,5 +178,55 @@ export async function scanPhotoWithPatches(file: File, patches: PatchAnchors): P
     throw await parseScanErrorBody(response);
   }
 
-  return (await response.json()) as ScanResult;
+  return mapScanResult((await response.json()) as ScanResultBody);
+}
+
+type ScanStateBody = {
+  scan_id: string;
+  season: Season;
+  swatches: ScanSwatch[];
+  paragraph: string | null;
+  paid: boolean;
+  full_report: { swatches: ScanSwatch[]; paragraph: string | null; note: string } | null;
+};
+
+/** Fetch a scan's current state by id — the free result plus whether it's
+ * been paid for. Pass sessionId (Stripe's session_id query param on the
+ * redirect back from Checkout) so the backend can self-heal `paid` from
+ * Stripe directly if the webhook hasn't landed yet. */
+export async function getScan(scanId: string, sessionId?: string): Promise<ScanState> {
+  const url = new URL(apiUrl(`/api/scans/${scanId}`));
+  if (sessionId) url.searchParams.set("session_id", sessionId);
+
+  const response = await fetch(url);
+
+  if (response.status === 404) {
+    throw new ScanNotFoundError("We couldn't find that scan.");
+  }
+  if (!response.ok) {
+    throw new ScanError("Something went wrong loading that result. Please try again.");
+  }
+
+  const body = (await response.json()) as ScanStateBody;
+  return {
+    scanId: body.scan_id,
+    season: body.season,
+    swatches: body.swatches,
+    paragraph: body.paragraph,
+    paid: body.paid,
+    fullReport: body.full_report,
+  };
+}
+
+/** Start a one-time Stripe Checkout session to unlock a scan's full
+ * report. Returns the hosted Checkout URL to redirect the browser to. */
+export async function createCheckoutSession(scanId: string): Promise<{ checkoutUrl: string }> {
+  const response = await fetch(apiUrl(`/api/scans/${scanId}/checkout`), { method: "POST" });
+
+  if (!response.ok) {
+    throw new ScanError("We couldn't start checkout right now. Please try again.");
+  }
+
+  const body = (await response.json()) as { checkout_url: string };
+  return { checkoutUrl: body.checkout_url };
 }

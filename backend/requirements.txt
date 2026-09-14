@@ -18,6 +18,9 @@ psycopg[binary]~=3.2
 # CLAUDE.md's critical rule)
 anthropic~=1.5
 
+# Stripe Checkout for the one-time full-report unlock
+stripe~=15.6
+
 # Test-only
 pytest~=8.3
 httpx~=0.28

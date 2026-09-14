@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 from typing import Literal
+from uuid import uuid4
 
 import cv2
 import numpy as np
@@ -10,8 +12,12 @@ from pydantic import BaseModel
 from app.analytics import log_event
 from app.palettes import SWATCHES_BY_SEASON
 from app.paragraph import generate_paragraph
+from app.scans_repo import create_scan
+from app.schemas import SwatchResponse
 from app.vision.season_classifier import Season, classify_season
 from app.vision.skin_sampling import AnchorPoints, sample_at_anchors, sample_skin_regions
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["scan"])
 
@@ -33,12 +39,8 @@ _CLASSIFY_ERROR_MESSAGES: dict[str, str] = {
 }
 
 
-class SwatchResponse(BaseModel):
-    name: str
-    hex: str
-
-
 class ScanResponse(BaseModel):
+    scan_id: str
     season: Season
     swatches: list[SwatchResponse]
     paragraph: str | None = None
@@ -91,6 +93,24 @@ async def _read_and_decode_photo(photo: UploadFile) -> np.ndarray:
 
 def _swatches_for(season: Season) -> list[SwatchResponse]:
     return [SwatchResponse(name=s.name, hex=s.hex) for s in SWATCHES_BY_SEASON[season]]
+
+
+def _persist_scan(season: Season, swatches: list[SwatchResponse], paragraph: str | None) -> str:
+    """Save the free-result fields and hand back a scan id.
+
+    Unlike log_event's best-effort contract, a scan that can't be persisted
+    can never legitimately be sold, so a failure here must surface to the
+    caller rather than being swallowed.
+    """
+    scan_id = str(uuid4())
+    try:
+        create_scan(scan_id, season, [s.model_dump() for s in swatches], paragraph)
+    except Exception:
+        logger.exception("Failed to persist scan %r", scan_id)
+        raise HTTPException(
+            status_code=503, detail="We couldn't save your scan right now. Please try again."
+        )
+    return scan_id
 
 
 def _patch_anchors_payload(anchors: AnchorPoints) -> PatchAnchorsPayload:
@@ -164,9 +184,11 @@ async def scan(background_tasks: BackgroundTasks, photo: UploadFile = File(...))
         )
 
     season = result.classification.season
+    swatches = _swatches_for(season)
     paragraph = generate_paragraph(result.classification, SWATCHES_BY_SEASON[season])
-    background_tasks.add_task(log_event, "scan_completed", {"season": season})
-    return ScanResponse(season=season, swatches=_swatches_for(season), paragraph=paragraph)
+    scan_id = _persist_scan(season, swatches, paragraph)
+    background_tasks.add_task(log_event, "scan_completed", {"season": season, "scan_id": scan_id})
+    return ScanResponse(scan_id=scan_id, season=season, swatches=swatches, paragraph=paragraph)
 
 
 @router.post("/scan/manual", response_model=ScanResponse)
@@ -236,6 +258,10 @@ async def scan_manual(
         )
 
     season = result.classification.season
+    swatches = _swatches_for(season)
     paragraph = generate_paragraph(result.classification, SWATCHES_BY_SEASON[season])
-    background_tasks.add_task(log_event, "scan_manual_completed", {"season": season})
-    return ScanResponse(season=season, swatches=_swatches_for(season), paragraph=paragraph)
+    scan_id = _persist_scan(season, swatches, paragraph)
+    background_tasks.add_task(
+        log_event, "scan_manual_completed", {"season": season, "scan_id": scan_id}
+    )
+    return ScanResponse(scan_id=scan_id, season=season, swatches=swatches, paragraph=paragraph)

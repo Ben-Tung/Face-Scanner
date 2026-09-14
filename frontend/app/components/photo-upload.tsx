@@ -1,5 +1,6 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 
 import { HealthCheck } from "@/app/components/health-check";
@@ -12,7 +13,6 @@ import {
   type LowConfidenceReason,
   type PatchAnchors,
   type ScanImageInfo,
-  type ScanResult,
 } from "@/lib/api";
 
 const LIGHTING_TIPS = [
@@ -48,7 +48,6 @@ type State =
       image: ScanImageInfo;
     }
   | { kind: "rescanning"; file: File; previewUrl: string }
-  | { kind: "result"; result: ScanResult; previewUrl: string }
   | { kind: "error"; message: string; previewUrl: string };
 
 function wait(ms: number): Promise<void> {
@@ -115,6 +114,7 @@ function ScanningOverlay({
 export function PhotoUpload() {
   const [state, setState] = useState<State>({ kind: "empty" });
   const inputRef = useRef<HTMLInputElement>(null);
+  const router = useRouter();
 
   async function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
@@ -129,7 +129,8 @@ export function PhotoUpload() {
 
     try {
       const [result] = await Promise.all([scanPhoto(file), wait(MIN_SCANNING_MS)]);
-      setState({ kind: "result", result, previewUrl });
+      URL.revokeObjectURL(previewUrl);
+      router.push(`/result/${result.scanId}`);
     } catch (error) {
       if (error instanceof LowConfidenceScanError) {
         setState({
@@ -159,7 +160,8 @@ export function PhotoUpload() {
         scanPhotoWithPatches(file, patches),
         wait(MIN_SCANNING_MS),
       ]);
-      setState({ kind: "result", result, previewUrl });
+      URL.revokeObjectURL(previewUrl);
+      router.push(`/result/${result.scanId}`);
     } catch (error) {
       if (error instanceof LowConfidenceScanError) {
         setState({
@@ -233,46 +235,6 @@ export function PhotoUpload() {
 
       {state.kind === "rescanning" && (
         <ScanningOverlay previewUrl={state.previewUrl} statusMessage={RESCAN_STATUS_MESSAGE} />
-      )}
-
-      {state.kind === "result" && (
-        <div className="animate-fade-in space-y-5">
-          <div className="space-y-1">
-            <p className="text-sm font-medium text-black/60 dark:text-white/60">
-              Your color season is
-            </p>
-            <h2 className="text-3xl font-semibold tracking-tight">{state.result.season}</h2>
-          </div>
-
-          {state.result.paragraph && (
-            <p className="text-sm leading-relaxed text-black/70 dark:text-white/70">
-              {state.result.paragraph}
-            </p>
-          )}
-
-          <div className="flex flex-wrap justify-center gap-4">
-            {state.result.swatches.map((swatch) => (
-              <div key={swatch.hex} className="w-16 space-y-1.5 text-center">
-                <div
-                  className="aspect-square w-full rounded-full border border-black/10 shadow-sm dark:border-white/15"
-                  style={{ backgroundColor: swatch.hex }}
-                  aria-hidden
-                />
-                <p className="text-[11px] leading-tight text-black/60 dark:text-white/60">
-                  {swatch.name}
-                </p>
-              </div>
-            ))}
-          </div>
-
-          <button
-            type="button"
-            onClick={() => inputRef.current?.click()}
-            className="w-full rounded-xl border border-black/10 px-4 py-3 text-sm font-medium dark:border-white/15"
-          >
-            Scan another photo
-          </button>
-        </div>
       )}
 
       {state.kind === "error" && (

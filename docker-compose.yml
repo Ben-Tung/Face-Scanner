@@ -23,6 +23,12 @@ services:
       ENVIRONMENT: development
       CORS_ORIGINS: '["http://localhost:3000"]'
       DATABASE_URL: postgresql://${POSTGRES_USER:-palette}:${POSTGRES_PASSWORD:-palette}@db:5432/${POSTGRES_DB:-palette}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      # Read by the backend to build Stripe success_url/cancel_url, so it
+      # points at the published host port (same reasoning as the frontend's
+      # NEXT_PUBLIC_API_URL below).
+      FRONTEND_BASE_URL: http://localhost:${FRONTEND_PORT:-3000}
     volumes:
       # Bind mount for uvicorn --reload. The anonymous volume keeps a host
       # .venv from shadowing anything inside the image.

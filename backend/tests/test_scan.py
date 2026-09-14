@@ -55,6 +55,7 @@ def test_scan_returns_season_and_swatches_for_real_photos(photo_path: Path):
 
     assert response.status_code == 200
     body = response.json()
+    assert body["scan_id"]
     assert body["season"] in {"Spring", "Summer", "Autumn", "Winter"}
     assert 4 <= len(body["swatches"]) <= 5
     for swatch in body["swatches"]:
@@ -121,6 +122,7 @@ def test_scan_manual_returns_season_and_swatches_for_well_lit_patches():
 
     assert response.status_code == 200
     body = response.json()
+    assert body["scan_id"]
     assert body["season"] in {"Spring", "Summer", "Autumn", "Winter"}
     assert 4 <= len(body["swatches"]) <= 5
     for swatch in body["swatches"]:
@@ -232,6 +234,21 @@ def test_scan_reports_structured_detail_for_patch_clipped(monkeypatch):
     assert detail["patches"]["forehead"] == {"x": 100.0, "y": 80.0}
     assert detail["patches"]["patch_half_size"] == 20.0
     assert detail["image"] == {"width": 640, "height": 480}
+
+
+def test_scan_returns_503_when_persistence_fails(monkeypatch):
+    def _raise(*args, **kwargs):
+        raise RuntimeError("DATABASE_URL is not configured; scan persistence requires a database.")
+
+    monkeypatch.setattr(scan_module, "create_scan", _raise)
+
+    response = client.post(
+        "/api/scan/manual",
+        files={"photo": ("patch.jpg", _solid_jpeg_bytes((216, 165, 152), size=60), "image/jpeg")},
+        data=_manual_form_fields((30, 15), (15, 40), (45, 40), 8),
+    )
+
+    assert response.status_code == 503
 
 
 def test_scan_reports_structured_detail_for_inconsistent_patches(monkeypatch):
