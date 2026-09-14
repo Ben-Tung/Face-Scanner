@@ -44,6 +44,7 @@ class ScanRow:
     paid: bool
     stripe_checkout_session_id: str | None
     stripe_payment_intent_id: str | None
+    full_report_paragraph: str | None
 
 
 def _connect() -> psycopg.Connection:
@@ -65,6 +66,11 @@ def _ensure_schema(conn: psycopg.Connection) -> None:
     global _schema_ready
     if not _schema_ready:
         conn.execute(_CREATE_TABLE_SQL)
+        # No migration tool (e.g. Alembic) exists in this repo — schema
+        # changes to an already-deployed table go here as idempotent ALTERs,
+        # each its own conn.execute() call since psycopg3 doesn't reliably
+        # run multiple statements passed to a single execute().
+        conn.execute("ALTER TABLE scans ADD COLUMN IF NOT EXISTS full_report_paragraph TEXT")
         _schema_ready = True
 
 
@@ -83,7 +89,8 @@ def get_scan(scan_id: str) -> ScanRow | None:
         row = conn.execute(
             """
             SELECT id, season, swatches, paragraph, paid,
-                   stripe_checkout_session_id, stripe_payment_intent_id
+                   stripe_checkout_session_id, stripe_payment_intent_id,
+                   full_report_paragraph
             FROM scans WHERE id = %s
             """,
             (scan_id,),
@@ -99,6 +106,7 @@ def get_scan(scan_id: str) -> ScanRow | None:
         paid=row[4],
         stripe_checkout_session_id=row[5],
         stripe_payment_intent_id=row[6],
+        full_report_paragraph=row[7],
     )
 
 
@@ -108,6 +116,17 @@ def set_checkout_session(scan_id: str, session_id: str) -> None:
         conn.execute(
             "UPDATE scans SET stripe_checkout_session_id = %s WHERE id = %s",
             (session_id, scan_id),
+        )
+
+
+def set_full_report_paragraph(scan_id: str, paragraph: str) -> None:
+    """Cache a lazily-generated paid-tier AI paragraph so subsequent reads
+    of the same scan don't pay for another Anthropic call."""
+    with _connect() as conn:
+        _ensure_schema(conn)
+        conn.execute(
+            "UPDATE scans SET full_report_paragraph = %s WHERE id = %s",
+            (paragraph, scan_id),
         )
 
 

@@ -14,16 +14,27 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Any
+from collections.abc import Sequence
+from typing import Any, Literal
 
 import stripe
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
 
 from app.analytics import log_event
+from app.beauty_guidance import GOLD_SWATCH, GUIDANCE_BY_SEASON, SILVER_SWATCH, BeautyGuidance
 from app.config import get_settings
-from app.scans_repo import ScanRow, get_scan, mark_scan_paid, set_checkout_session
+from app.palettes import FULL_PALETTE_BY_SEASON, Swatch
+from app.paragraph import generate_full_report_paragraph
+from app.scans_repo import (
+    ScanRow,
+    get_scan,
+    mark_scan_paid,
+    set_checkout_session,
+    set_full_report_paragraph,
+)
 from app.schemas import SwatchResponse
+from app.vision.season_classifier import Season
 
 logger = logging.getLogger(__name__)
 
@@ -33,13 +44,33 @@ router = APIRouter(prefix="/api", tags=["payments"])
 # The client never supplies or influences this value.
 _FULL_REPORT_PRICE_CENTS = 299
 
-_FULL_REPORT_NOTE = "Full report content coming soon — you've unlocked payment successfully."
+
+class PaletteSectionResponse(BaseModel):
+    best: list[SwatchResponse]
+    good: list[SwatchResponse]
+    avoid: list[SwatchResponse]
+
+
+class MakeupGuidanceResponse(BaseModel):
+    foundation_undertone: str
+    foundation_tip: str
+    lip_shades: list[SwatchResponse]
+    blush_shades: list[SwatchResponse]
+
+
+class JewelryGuidanceResponse(BaseModel):
+    metal: Literal["Gold", "Silver", "Both"]
+    tip: str
+    gold_swatch: SwatchResponse
+    silver_swatch: SwatchResponse
 
 
 class FullReportResponse(BaseModel):
-    swatches: list[SwatchResponse]
+    palette: PaletteSectionResponse
+    makeup: MakeupGuidanceResponse
+    jewelry: JewelryGuidanceResponse
+    shopping_guidance: str
     paragraph: str | None
-    note: str
 
 
 class ScanStateResponse(BaseModel):
@@ -66,13 +97,61 @@ def _swatches_response(row: ScanRow) -> list[SwatchResponse]:
     return [SwatchResponse(**swatch) for swatch in row.swatches]
 
 
+def _to_swatch_responses(swatches: Sequence[Swatch]) -> list[SwatchResponse]:
+    return [SwatchResponse(name=s.name, hex=s.hex) for s in swatches]
+
+
+def _resolve_full_report_paragraph(
+    row: ScanRow, season: Season, best_swatches: Sequence[Swatch], guidance: BeautyGuidance
+) -> str | None:
+    """Return the cached paid paragraph, or generate and cache one.
+
+    The palette/guidance are cheap and deterministic, recomputed on every
+    call from `row.season` alone. The AI paragraph is the one part that
+    costs money and has latency, so it's generated once (lazily, on first
+    paid view) and cached on the row for every read after that.
+    """
+    if row.full_report_paragraph:
+        return row.full_report_paragraph
+
+    paragraph = generate_full_report_paragraph(season, best_swatches, guidance)
+    if paragraph:
+        set_full_report_paragraph(row.id, paragraph)
+    return paragraph
+
+
+def _full_report_response(row: ScanRow) -> FullReportResponse:
+    palette = FULL_PALETTE_BY_SEASON[row.season]
+    guidance = GUIDANCE_BY_SEASON[row.season]
+
+    paragraph = _resolve_full_report_paragraph(row, row.season, palette.best, guidance)
+
+    return FullReportResponse(
+        palette=PaletteSectionResponse(
+            best=_to_swatch_responses(palette.best),
+            good=_to_swatch_responses(palette.good),
+            avoid=_to_swatch_responses(palette.avoid),
+        ),
+        makeup=MakeupGuidanceResponse(
+            foundation_undertone=guidance.makeup.foundation_undertone,
+            foundation_tip=guidance.makeup.foundation_tip,
+            lip_shades=_to_swatch_responses(guidance.makeup.lip_shades),
+            blush_shades=_to_swatch_responses(guidance.makeup.blush_shades),
+        ),
+        jewelry=JewelryGuidanceResponse(
+            metal=guidance.jewelry.metal,
+            tip=guidance.jewelry.tip,
+            gold_swatch=SwatchResponse(name=GOLD_SWATCH.name, hex=GOLD_SWATCH.hex),
+            silver_swatch=SwatchResponse(name=SILVER_SWATCH.name, hex=SILVER_SWATCH.hex),
+        ),
+        shopping_guidance=guidance.shopping_guidance,
+        paragraph=paragraph,
+    )
+
+
 def _scan_state_response(row: ScanRow, paid: bool) -> ScanStateResponse:
     swatches = _swatches_response(row)
-    full_report = (
-        FullReportResponse(swatches=swatches, paragraph=row.paragraph, note=_FULL_REPORT_NOTE)
-        if paid
-        else None
-    )
+    full_report = _full_report_response(row) if paid else None
     return ScanStateResponse(
         scan_id=row.id,
         season=row.season,

@@ -1,4 +1,5 @@
 from app import paragraph
+from app.beauty_guidance import GUIDANCE_BY_SEASON
 from app.config import Settings
 from app.palettes import Swatch
 from app.vision.season_classifier import SeasonClassification
@@ -67,3 +68,54 @@ def test_generate_paragraph_returns_extracted_text(monkeypatch):
 
     result = paragraph.generate_paragraph(_classification(), _swatches())
     assert result == "You're a Winter — cool, deep, and clear."
+
+
+def test_generate_full_report_paragraph_noops_without_api_key(monkeypatch):
+    monkeypatch.setattr(paragraph, "get_settings", lambda: Settings(anthropic_api_key=None))
+
+    def _fail_if_called():
+        raise AssertionError("must not construct a client without an API key")
+
+    monkeypatch.setattr(paragraph, "_client", _fail_if_called)
+
+    result = paragraph.generate_full_report_paragraph("Winter", _swatches(), GUIDANCE_BY_SEASON["Winter"])
+    assert result is None
+
+
+def test_generate_full_report_paragraph_swallows_client_errors(monkeypatch):
+    monkeypatch.setattr(paragraph, "get_settings", lambda: Settings(anthropic_api_key="test-key"))
+
+    class _RaisingMessages:
+        def create(self, **kwargs):
+            raise RuntimeError("network boom")
+
+    class _FakeClient:
+        messages = _RaisingMessages()
+
+    monkeypatch.setattr(paragraph, "_client", lambda: _FakeClient())
+
+    result = paragraph.generate_full_report_paragraph("Winter", _swatches(), GUIDANCE_BY_SEASON["Winter"])
+    assert result is None
+
+
+def test_generate_full_report_paragraph_returns_extracted_text(monkeypatch):
+    monkeypatch.setattr(paragraph, "get_settings", lambda: Settings(anthropic_api_key="test-key"))
+
+    class _TextBlock:
+        type = "text"
+        text = "Your Winter palette is bold, clear, and unmistakably yours."
+
+    class _FakeResponse:
+        content = [_TextBlock()]
+
+    class _FakeMessages:
+        def create(self, **kwargs):
+            return _FakeResponse()
+
+    class _FakeClient:
+        messages = _FakeMessages()
+
+    monkeypatch.setattr(paragraph, "_client", lambda: _FakeClient())
+
+    result = paragraph.generate_full_report_paragraph("Winter", _swatches(), GUIDANCE_BY_SEASON["Winter"])
+    assert result == "Your Winter palette is bold, clear, and unmistakably yours."

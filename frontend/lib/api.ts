@@ -19,10 +19,34 @@ export type ScanResult = {
   paragraph: string | null;
 };
 
+export type SeasonPalette = {
+  best: ScanSwatch[];
+  good: ScanSwatch[];
+  avoid: ScanSwatch[];
+};
+
+export type MakeupGuidance = {
+  foundationUndertone: string;
+  foundationTip: string;
+  lipShades: ScanSwatch[];
+  blushShades: ScanSwatch[];
+};
+
+export type JewelryMetal = "Gold" | "Silver" | "Both";
+
+export type JewelryGuidance = {
+  metal: JewelryMetal;
+  tip: string;
+  goldSwatch: ScanSwatch;
+  silverSwatch: ScanSwatch;
+};
+
 export type FullReport = {
-  swatches: ScanSwatch[];
+  palette: SeasonPalette;
+  makeup: MakeupGuidance;
+  jewelry: JewelryGuidance;
+  shoppingGuidance: string;
   paragraph: string | null;
-  note: string;
 };
 
 export type ScanState = {
@@ -181,14 +205,47 @@ export async function scanPhotoWithPatches(file: File, patches: PatchAnchors): P
   return mapScanResult((await response.json()) as ScanResultBody);
 }
 
+type FullReportBody = {
+  palette: { best: ScanSwatch[]; good: ScanSwatch[]; avoid: ScanSwatch[] };
+  makeup: {
+    foundation_undertone: string;
+    foundation_tip: string;
+    lip_shades: ScanSwatch[];
+    blush_shades: ScanSwatch[];
+  };
+  jewelry: { metal: JewelryMetal; tip: string; gold_swatch: ScanSwatch; silver_swatch: ScanSwatch };
+  shopping_guidance: string;
+  paragraph: string | null;
+};
+
 type ScanStateBody = {
   scan_id: string;
   season: Season;
   swatches: ScanSwatch[];
   paragraph: string | null;
   paid: boolean;
-  full_report: { swatches: ScanSwatch[]; paragraph: string | null; note: string } | null;
+  full_report: FullReportBody | null;
 };
+
+function mapFullReport(body: FullReportBody): FullReport {
+  return {
+    palette: body.palette,
+    makeup: {
+      foundationUndertone: body.makeup.foundation_undertone,
+      foundationTip: body.makeup.foundation_tip,
+      lipShades: body.makeup.lip_shades,
+      blushShades: body.makeup.blush_shades,
+    },
+    jewelry: {
+      metal: body.jewelry.metal,
+      tip: body.jewelry.tip,
+      goldSwatch: body.jewelry.gold_swatch,
+      silverSwatch: body.jewelry.silver_swatch,
+    },
+    shoppingGuidance: body.shopping_guidance,
+    paragraph: body.paragraph,
+  };
+}
 
 /** Fetch a scan's current state by id — the free result plus whether it's
  * been paid for. Pass sessionId (Stripe's session_id query param on the
@@ -214,7 +271,7 @@ export async function getScan(scanId: string, sessionId?: string): Promise<ScanS
     swatches: body.swatches,
     paragraph: body.paragraph,
     paid: body.paid,
-    fullReport: body.full_report,
+    fullReport: body.full_report ? mapFullReport(body.full_report) : null,
   };
 }
 

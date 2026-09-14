@@ -12,6 +12,8 @@ import {
   type ScanState,
   type ScanSwatch,
 } from "@/lib/api";
+import { ColorChip } from "./color-chip";
+import { FullReportView } from "./full-report-view";
 
 type ViewState =
   | { kind: "loading" }
@@ -22,14 +24,7 @@ function SwatchGrid({ swatches }: { swatches: ScanSwatch[] }) {
   return (
     <div className="flex flex-wrap justify-center gap-4">
       {swatches.map((swatch) => (
-        <div key={swatch.hex} className="w-16 space-y-1.5 text-center">
-          <div
-            className="aspect-square w-full rounded-full border border-black/10 shadow-sm dark:border-white/15"
-            style={{ backgroundColor: swatch.hex }}
-            aria-hidden
-          />
-          <p className="text-[11px] leading-tight text-black/60 dark:text-white/60">{swatch.name}</p>
-        </div>
+        <ColorChip key={swatch.hex} swatch={swatch} />
       ))}
     </div>
   );
@@ -133,17 +128,7 @@ export function ScanResultView() {
       </div>
 
       {scan.paid && scan.fullReport ? (
-        <>
-          <div className="rounded-xl border border-black/10 bg-black/[0.03] p-4 text-sm text-black/70 dark:border-white/15 dark:bg-white/[0.03] dark:text-white/70">
-            {scan.fullReport.note}
-          </div>
-          {scan.fullReport.paragraph && (
-            <p className="text-sm leading-relaxed text-black/70 dark:text-white/70">
-              {scan.fullReport.paragraph}
-            </p>
-          )}
-          <SwatchGrid swatches={scan.fullReport.swatches} />
-        </>
+        <FullReportView fullReport={scan.fullReport} />
       ) : (
         <>
           {scan.paragraph && (

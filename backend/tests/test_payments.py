@@ -49,6 +49,7 @@ def _unpaid_row(scan_id: str = _SCAN_ID) -> ScanRow:
         paid=False,
         stripe_checkout_session_id=None,
         stripe_payment_intent_id=None,
+        full_report_paragraph=None,
     )
 
 
@@ -150,17 +151,85 @@ def test_get_scan_state_unpaid_has_no_full_report(monkeypatch):
     assert logged and logged[0][0][0] == "paywall_viewed"
 
 
-def test_get_scan_state_paid_returns_full_report_stub(monkeypatch):
+def test_get_scan_state_paid_returns_full_palette_and_guidance(monkeypatch):
     monkeypatch.setattr(payments_module, "get_scan", lambda scan_id: _paid_row())
     monkeypatch.setattr(payments_module, "log_event", lambda *a, **k: pytest.fail("should not log paywall_viewed"))
+    monkeypatch.setattr(
+        payments_module,
+        "generate_full_report_paragraph",
+        lambda season, best_swatches, guidance: "Your Winter palette is bold and clear.",
+    )
+    monkeypatch.setattr(payments_module, "set_full_report_paragraph", lambda scan_id, paragraph: None)
 
     response = client.get(f"/api/scans/{_SCAN_ID}")
 
     assert response.status_code == 200
     body = response.json()
     assert body["paid"] is True
-    assert body["full_report"]["swatches"] == body["swatches"]
-    assert body["full_report"]["note"]
+
+    full_report = body["full_report"]
+    palette = full_report["palette"]
+    assert 10 <= len(palette["best"]) <= 12
+    assert 8 <= len(palette["good"]) <= 10
+    assert 6 <= len(palette["avoid"]) <= 8
+
+    makeup = full_report["makeup"]
+    assert makeup["foundation_undertone"]
+    assert makeup["foundation_tip"]
+    assert makeup["lip_shades"]
+    assert makeup["blush_shades"]
+
+    jewelry = full_report["jewelry"]
+    assert jewelry["metal"] in {"Gold", "Silver", "Both"}
+    assert jewelry["tip"]
+    assert jewelry["gold_swatch"]["hex"]
+    assert jewelry["silver_swatch"]["hex"]
+
+    assert full_report["shopping_guidance"]
+    assert full_report["paragraph"] == "Your Winter palette is bold and clear."
+
+
+def test_get_scan_state_paid_generates_and_persists_paragraph_once(monkeypatch):
+    monkeypatch.setattr(payments_module, "get_scan", lambda scan_id: _paid_row())
+    monkeypatch.setattr(payments_module, "log_event", lambda *a, **k: None)
+
+    generated = []
+
+    def _fake_generate(season, best_swatches, guidance):
+        generated.append(season)
+        return "Freshly generated paragraph."
+
+    persisted = []
+    monkeypatch.setattr(payments_module, "generate_full_report_paragraph", _fake_generate)
+    monkeypatch.setattr(
+        payments_module, "set_full_report_paragraph", lambda scan_id, paragraph: persisted.append((scan_id, paragraph))
+    )
+
+    response = client.get(f"/api/scans/{_SCAN_ID}")
+
+    assert response.status_code == 200
+    assert response.json()["full_report"]["paragraph"] == "Freshly generated paragraph."
+    assert generated == ["Winter"]
+    assert persisted == [(_SCAN_ID, "Freshly generated paragraph.")]
+
+
+def test_get_scan_state_paid_does_not_regenerate_a_cached_paragraph(monkeypatch):
+    row = dataclasses.replace(_paid_row(), full_report_paragraph="Already cached.")
+    monkeypatch.setattr(payments_module, "get_scan", lambda scan_id: row)
+    monkeypatch.setattr(payments_module, "log_event", lambda *a, **k: None)
+    monkeypatch.setattr(
+        payments_module,
+        "generate_full_report_paragraph",
+        lambda *a, **k: pytest.fail("must not regenerate a cached paragraph"),
+    )
+    monkeypatch.setattr(
+        payments_module, "set_full_report_paragraph", lambda *a, **k: pytest.fail("must not re-persist")
+    )
+
+    response = client.get(f"/api/scans/{_SCAN_ID}")
+
+    assert response.status_code == 200
+    assert response.json()["full_report"]["paragraph"] == "Already cached."
 
 
 def test_get_scan_state_self_heals_on_matching_session(monkeypatch):

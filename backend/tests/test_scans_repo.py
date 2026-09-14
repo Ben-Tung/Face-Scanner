@@ -81,6 +81,7 @@ def test_create_and_get_scan_round_trip(scan_id):
     assert row.paid is False
     assert row.stripe_checkout_session_id is None
     assert row.stripe_payment_intent_id is None
+    assert row.full_report_paragraph is None
 
 
 @pytest.mark.skipif(not _DB_REACHABLE, reason=_SKIP_REASON)
@@ -114,6 +115,16 @@ def test_mark_scan_paid_is_idempotent(scan_id):
 
     assert row.paid is True
     assert row.stripe_payment_intent_id == "pi_123"
+
+
+@pytest.mark.skipif(not _DB_REACHABLE, reason=_SKIP_REASON)
+def test_set_full_report_paragraph_persists_text(scan_id):
+    scans_repo.create_scan(scan_id, "Autumn", [], None)
+
+    scans_repo.set_full_report_paragraph(scan_id, "Your Autumn palette runs warm and rich.")
+    row = scans_repo.get_scan(scan_id)
+
+    assert row.full_report_paragraph == "Your Autumn palette runs warm and rich."
 
 
 @pytest.mark.skipif(not _DB_REACHABLE, reason=_SKIP_REASON)
