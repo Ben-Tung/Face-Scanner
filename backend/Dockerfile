@@ -6,8 +6,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 # MediaPipe/OpenCV need these for image decoding even in headless mode.
+# libegl1 is required by mediapipe's C-bindings loader (mediapipe>=1.0),
+# which dlopens libEGL.so.1 even for CPU-only image-mode inference.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 curl \
+    && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 libegl1 curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Dependencies first so source edits don't invalidate the install layer.
