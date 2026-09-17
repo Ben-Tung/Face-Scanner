@@ -5,7 +5,12 @@ import { useEffect, useRef, useState } from "react";
 
 import { HealthCheck } from "@/app/components/health-check";
 import { PatchAdjuster } from "@/app/components/patch-adjuster";
-import { CARD_CLASS, PRIMARY_BUTTON_CLASS, SPINNER_CLASS } from "@/app/components/ui";
+import {
+  CARD_CLASS,
+  PRIMARY_BUTTON_CLASS,
+  SECONDARY_BUTTON_CLASS,
+  SPINNER_CLASS,
+} from "@/app/components/ui";
 import {
   LowConfidenceScanError,
   ScanError,
@@ -118,7 +123,8 @@ function ScanningOverlay({
 
 export function PhotoUpload() {
   const [state, setState] = useState<State>({ kind: "empty" });
-  const inputRef = useRef<HTMLInputElement>(null);
+  const selfieInputRef = useRef<HTMLInputElement>(null);
+  const libraryInputRef = useRef<HTMLInputElement>(null);
   const router = useRouter();
 
   async function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
@@ -189,10 +195,17 @@ export function PhotoUpload() {
   return (
     <div className="space-y-4">
       <input
-        ref={inputRef}
+        ref={selfieInputRef}
         type="file"
         accept="image/*"
         capture="user"
+        onChange={handleFileChange}
+        className="hidden"
+      />
+      <input
+        ref={libraryInputRef}
+        type="file"
+        accept="image/*"
         onChange={handleFileChange}
         className="hidden"
       />
@@ -213,13 +226,22 @@ export function PhotoUpload() {
             </ul>
           </div>
 
-          <button
-            type="button"
-            onClick={() => inputRef.current?.click()}
-            className={PRIMARY_BUTTON_CLASS}
-          >
-            Take or choose a selfie
-          </button>
+          <div className="space-y-2">
+            <button
+              type="button"
+              onClick={() => selfieInputRef.current?.click()}
+              className={PRIMARY_BUTTON_CLASS}
+            >
+              Take a selfie
+            </button>
+            <button
+              type="button"
+              onClick={() => libraryInputRef.current?.click()}
+              className={SECONDARY_BUTTON_CLASS}
+            >
+              Choose from library
+            </button>
+          </div>
 
           {SHOW_HEALTH_CHECK && <HealthCheck />}
         </div>
@@ -234,7 +256,8 @@ export function PhotoUpload() {
           initialPatches={state.patches}
           message={state.message}
           onSubmit={handlePatchSubmit}
-          onRetake={() => inputRef.current?.click()}
+          onRetakeSelfie={() => selfieInputRef.current?.click()}
+          onRetakeLibrary={() => libraryInputRef.current?.click()}
         />
       )}
 
@@ -250,13 +273,22 @@ export function PhotoUpload() {
           >
             {state.message}
           </div>
-          <button
-            type="button"
-            onClick={() => inputRef.current?.click()}
-            className={PRIMARY_BUTTON_CLASS}
-          >
-            Try another photo
-          </button>
+          <div className="space-y-2">
+            <button
+              type="button"
+              onClick={() => selfieInputRef.current?.click()}
+              className={PRIMARY_BUTTON_CLASS}
+            >
+              Take a selfie
+            </button>
+            <button
+              type="button"
+              onClick={() => libraryInputRef.current?.click()}
+              className={SECONDARY_BUTTON_CLASS}
+            >
+              Choose from library
+            </button>
+          </div>
         </div>
       )}
     </div>

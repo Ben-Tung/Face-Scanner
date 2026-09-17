@@ -4,7 +4,7 @@ import { useRef, useState } from "react";
 
 import type { PatchAnchors, PatchPoint, ScanImageInfo } from "@/lib/api";
 
-import { PRIMARY_BUTTON_CLASS } from "./ui";
+import { PRIMARY_BUTTON_CLASS, SECONDARY_BUTTON_CLASS } from "./ui";
 
 type PatchKey = "forehead" | "leftCheek" | "rightCheek";
 
@@ -28,7 +28,8 @@ type PatchAdjusterProps = {
   initialPatches: PatchAnchors;
   message: string;
   onSubmit: (patches: PatchAnchors) => void;
-  onRetake: () => void;
+  onRetakeSelfie: () => void;
+  onRetakeLibrary: () => void;
 };
 
 // Seeding state from `initialPatches` only on mount (not re-synced on prop
@@ -41,7 +42,8 @@ export function PatchAdjuster({
   initialPatches,
   message,
   onSubmit,
-  onRetake,
+  onRetakeSelfie,
+  onRetakeLibrary,
 }: PatchAdjusterProps) {
   const [patches, setPatches] = useState<PatchAnchors>(initialPatches);
   const imgRef = useRef<HTMLImageElement>(null);
@@ -160,12 +162,11 @@ export function PatchAdjuster({
         >
           Rescan
         </button>
-        <button
-          type="button"
-          onClick={onRetake}
-          className="w-full rounded-xl border border-black/10 px-4 py-3 text-sm font-medium dark:border-white/15"
-        >
-          Retake photo
+        <button type="button" onClick={onRetakeSelfie} className={SECONDARY_BUTTON_CLASS}>
+          Take a selfie
+        </button>
+        <button type="button" onClick={onRetakeLibrary} className={SECONDARY_BUTTON_CLASS}>
+          Choose from library
         </button>
       </div>
     </div>
