@@ -9,7 +9,7 @@ calling this; nothing here persists the image.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -27,6 +27,12 @@ _RIGHT_EYE = vision.FaceLandmarksConnections.FACE_LANDMARKS_RIGHT_EYE
 _LEFT_EYEBROW = vision.FaceLandmarksConnections.FACE_LANDMARKS_LEFT_EYEBROW
 _RIGHT_EYEBROW = vision.FaceLandmarksConnections.FACE_LANDMARKS_RIGHT_EYEBROW
 _FACE_OVAL = vision.FaceLandmarksConnections.FACE_LANDMARKS_FACE_OVAL
+# Iris ring landmarks (4 points each, no center node - see compute_eye_geometry
+# for why the center is derived from these rather than the isolated landmarks
+# 468/473). Only present in the 478-point FaceLandmarker output, not the
+# legacy 468-point face mesh.
+_LEFT_IRIS = vision.FaceLandmarksConnections.FACE_LANDMARKS_LEFT_IRIS
+_RIGHT_IRIS = vision.FaceLandmarksConnections.FACE_LANDMARKS_RIGHT_IRIS
 
 # Anchor offsets and patch size are ratios of the face's own eyebrow/eye/chin
 # geometry rather than fixed landmark indices or pixel counts, so they scale
@@ -54,8 +60,44 @@ _OUTLIER_PERCENTILE_BAND = (10, 90)  # trims shadow/highlight pixels by Lab L
 _CLIPPING_NEAR_THRESHOLD = 5  # channel value within this of 0 or 255 counts as clipped
 _CLIPPED_PIXEL_FRACTION_THRESHOLD = 0.3  # this much of a patch clipped -> unreliable
 
+# Sclera (whites of the eyes) sampling: used as a per-photo lighting reference
+# to normalize skin depth against exposure/lighting (see
+# season_classifier.normalize_depth_lightness) - raw skin L* alone is
+# confounded with each photo's own exposure. Eyes are only a few dozen pixels
+# of usable sclera even in an ordinary forward-gaze selfie, so every constant
+# here is tuned toward "don't trust a bad read" over "always produce a
+# reading" - see sample_sclera's fallback-to-uncorrected-L* behavior.
+_EYE_POLYGON_SHRINK_RATIO = 0.85  # shrink the eye-opening polygon toward its own centroid
+# before masking, to keep eyelid-margin/eyelash pixels out. NOT cv2.erode: a
+# kernel sized as a ratio of interocular distance (this file's usual scale
+# for eye-region geometry) destructively collapses the sclera crescent, which
+# is roughly 10x smaller than interocular distance - a kernel of just 2% of
+# interocular distance shrank a real sclera-candidate region from 2098px to
+# 372px, and 4% collapsed it to zero. Shrinking each eye's own polygon toward
+# its own centroid self-scales correctly regardless of face size instead.
+_IRIS_DILATION_RATIO = 0.15  # inflate the iris circle beyond its landmark ring, to swallow limbus blending
+_SCLERA_LIGHTNESS_PERCENTILE_BAND = (60, 95)  # asymmetric, unlike skin's symmetric
+# (10, 90): sclera contamination (eyelash shadow, lid-crease shadow, caruncle
+# tissue) is overwhelmingly on the dark side, while the only bright-side
+# contaminant - a small specular catchlight - is safely trimmed by the top 5%.
+_MIN_SCLERA_PIXEL_COUNT = 20  # below this, a median isn't trustworthy - first-pass value,
+# refine with scripts/classify_photo_batch.py against real photos
+_EYE_OPENNESS_MIN_RATIO = 0.15  # eye polygon bbox height/width below this -> closed/too-squinted to sample
+_EYE_WIDTH_ASYMMETRY_MAX_RATIO = 0.5  # one eye's polygon bbox width below this fraction
+# of the other's -> likely foreshortened by an extreme head angle/profile;
+# no fixture example exists to validate this specific constant against real
+# profile shots, so treat it as an unvalidated placeholder
+
 RGB = tuple[int, int, int]
 SampleFailureReason = Literal["no_face_detected", "face_out_of_frame", "patch_clipped"]
+ScleraFailureReason = Literal["eyes_closed", "extreme_angle", "sclera_clipped", "insufficient_pixels"]
+
+
+@dataclass(frozen=True)
+class ScleraSampleResult:
+    success: bool
+    sclera_rgb: RGB | None = None
+    error: ScleraFailureReason | None = None
 
 
 @dataclass(frozen=True)
@@ -66,6 +108,11 @@ class SkinSampleResult:
     right_cheek_rgb: RGB | None = None
     error: SampleFailureReason | None = None
     anchors: AnchorPoints | None = None
+    # Only ever populated by sample_skin_regions (needs the full landmark
+    # array, which the manual-adjustment recovery flow's sample_at_anchors
+    # doesn't have) - None there, and whenever the sclera itself couldn't be
+    # reliably read for this photo.
+    sclera: ScleraSampleResult | None = None
 
 
 @dataclass(frozen=True)
@@ -128,6 +175,68 @@ def compute_anchor_points(points: np.ndarray) -> AnchorPoints:
     patch_half_size = max(interocular * _PATCH_HALF_SIZE_RATIO, _MIN_PATCH_HALF_SIZE)
 
     return AnchorPoints(forehead, left_cheek, right_cheek, patch_half_size)
+
+
+@dataclass(frozen=True)
+class EyeGeometry:
+    polygon: np.ndarray  # (16, 2) ordered eye-opening contour, pixel coords
+    iris_center: np.ndarray
+    iris_radius: float
+    openness_ratio: float  # polygon bbox height / width; low = closed/squinting
+
+
+def _ordered_loop(connections) -> list[int]:
+    """Walk a MediaPipe connection set forming one closed loop into perimeter order.
+
+    `_connection_indices` returns the same index set sorted by landmark id,
+    which destroys adjacency - a raster mask (`cv2.fillPoly`) needs vertices
+    in boundary-walk order instead. Assumes `connections` forms a single
+    simple cycle (true of `_LEFT_EYE`/`_RIGHT_EYE`, each a 16-node loop).
+    """
+    neighbors: dict[int, list[int]] = {}
+    for connection in connections:
+        neighbors.setdefault(connection.start, []).append(connection.end)
+        neighbors.setdefault(connection.end, []).append(connection.start)
+
+    start = next(iter(neighbors))
+    loop = [start]
+    prev, current = None, start
+    while True:
+        next_node = next(n for n in neighbors[current] if n != prev)
+        if next_node == start:
+            return loop
+        loop.append(next_node)
+        prev, current = current, next_node
+
+
+def _eye_geometry(points: np.ndarray, eye_loop: list[int], iris_indices: list[int]) -> EyeGeometry:
+    polygon = points[eye_loop]
+    iris_ring = points[iris_indices]
+    # Center/radius from the ring's own centroid and mean radius, not the
+    # isolated center landmarks (468 right / 473 left) - those have no edges
+    # in FaceLandmarksConnections, so they're unreachable via the same
+    # connection-based approach used for every other point in this file.
+    iris_center = iris_ring.mean(axis=0)
+    iris_radius = float(np.linalg.norm(iris_ring - iris_center, axis=1).mean())
+
+    width = polygon[:, 0].max() - polygon[:, 0].min()
+    height = polygon[:, 1].max() - polygon[:, 1].min()
+    openness_ratio = float(height / width) if width > 0 else 0.0
+
+    return EyeGeometry(polygon=polygon, iris_center=iris_center, iris_radius=iris_radius, openness_ratio=openness_ratio)
+
+
+def compute_eye_geometry(points: np.ndarray) -> tuple[EyeGeometry, EyeGeometry]:
+    """Left/right eye-opening polygon + iris geometry from face landmarks.
+
+    Pure geometry - no image/model dependency - so it's unit-testable with
+    synthetic landmarks the same way as `compute_anchor_points`. Requires the
+    full 478-point FaceLandmarker output (landmarks 468-477 are the iris
+    ring points); the legacy 468-point face mesh doesn't carry these.
+    """
+    left = _eye_geometry(points, _ordered_loop(_LEFT_EYE), _connection_indices(_LEFT_IRIS))
+    right = _eye_geometry(points, _ordered_loop(_RIGHT_EYE), _connection_indices(_RIGHT_IRIS))
+    return left, right
 
 
 def _patch_bounds(
@@ -194,6 +303,101 @@ def patch_clipped_fraction(image_rgb: np.ndarray, center: np.ndarray, half_size:
     near_white = np.all(pixels >= 255 - _CLIPPING_NEAR_THRESHOLD, axis=1)
     near_black = np.all(pixels <= _CLIPPING_NEAR_THRESHOLD, axis=1)
     return float((near_white | near_black).mean())
+
+
+def _sclera_mask(image_shape: tuple[int, int], eye: EyeGeometry) -> np.ndarray:
+    """Boolean mask of one eye's sclera-candidate region: its (shrunk) eye-
+    opening polygon minus its (dilated) iris circle."""
+    height, width = image_shape
+    mask = np.zeros((height, width), dtype=np.uint8)
+
+    centroid = eye.polygon.mean(axis=0)
+    shrunk_polygon = centroid + (eye.polygon - centroid) * _EYE_POLYGON_SHRINK_RATIO
+    cv2.fillPoly(mask, [np.round(shrunk_polygon).astype(np.int32)], 1)
+
+    iris_center = (int(round(eye.iris_center[0])), int(round(eye.iris_center[1])))
+    iris_radius = max(int(round(eye.iris_radius * (1.0 + _IRIS_DILATION_RATIO))), 1)
+    cv2.circle(mask, iris_center, iris_radius, 0, thickness=-1)
+
+    return mask.astype(bool)
+
+
+def _sclera_pixels(image_rgb: np.ndarray, image_lab: np.ndarray, eye: EyeGeometry) -> tuple[np.ndarray, np.ndarray]:
+    """Raw (pre-trim) sclera-candidate pixels for one eye: RGB array and matching Lab-L array."""
+    mask = _sclera_mask(image_rgb.shape[:2], eye)
+    return image_rgb[mask], image_lab[mask][:, 0]
+
+
+def _trim_to_brighter_band(rgb_pixels: np.ndarray, lightness: np.ndarray) -> np.ndarray:
+    """Bright-skewed percentile trim (see `_SCLERA_LIGHTNESS_PERCENTILE_BAND`); returns surviving RGB pixels."""
+    if lightness.size == 0:
+        return rgb_pixels
+    low, high = np.percentile(lightness, _SCLERA_LIGHTNESS_PERCENTILE_BAND)
+    keep = (lightness >= low) & (lightness <= high)
+    return rgb_pixels[keep]
+
+
+def sclera_clipped_fraction(image_rgb: np.ndarray, eye: EyeGeometry) -> float | None:
+    """Fraction of an eye's raw sclera-candidate pixels that are glare blowout.
+
+    Same all-three-channels-near-255 logic as `patch_clipped_fraction`.
+    Returns None if the masked region is empty.
+    """
+    mask = _sclera_mask(image_rgb.shape[:2], eye)
+    if not mask.any():
+        return None
+    pixels = image_rgb[mask]
+    near_white = np.all(pixels >= 255 - _CLIPPING_NEAR_THRESHOLD, axis=1)
+    return float(near_white.mean())
+
+
+def _eye_unreliable_reason(image_rgb: np.ndarray, eye: EyeGeometry, other: EyeGeometry) -> ScleraFailureReason | None:
+    """Cheapest checks first: geometry-only, then a pixel pass only if needed."""
+    if eye.openness_ratio < _EYE_OPENNESS_MIN_RATIO:
+        return "eyes_closed"
+
+    this_width = eye.polygon[:, 0].max() - eye.polygon[:, 0].min()
+    other_width = other.polygon[:, 0].max() - other.polygon[:, 0].min()
+    if other_width > 0 and this_width / other_width < _EYE_WIDTH_ASYMMETRY_MAX_RATIO:
+        return "extreme_angle"
+
+    clipped = sclera_clipped_fraction(image_rgb, eye)
+    if clipped is not None and clipped >= _CLIPPED_PIXEL_FRACTION_THRESHOLD:
+        return "sclera_clipped"
+
+    return None
+
+
+def sample_sclera(image_rgb: np.ndarray, image_lab: np.ndarray, points: np.ndarray) -> ScleraSampleResult:
+    """Sample a per-photo lighting-reference RGB from the whites of the eyes.
+
+    Tries both eyes independently; pools their post-trim pixels into one
+    median when both pass their own reliability checks (more samples where
+    per-eye counts are often small - the sclera crescent beside the iris is
+    inherently small at ordinary selfie framing), falls back to whichever
+    single eye passes if only one does, and fails - meaning the caller
+    should classify with uncorrected skin lightness instead - if neither does.
+    """
+    left, right = compute_eye_geometry(points)
+    left_reason = _eye_unreliable_reason(image_rgb, left, right)
+    right_reason = _eye_unreliable_reason(image_rgb, right, left)
+
+    kept_pixel_sets = []
+    if left_reason is None:
+        kept_pixel_sets.append(_trim_to_brighter_band(*_sclera_pixels(image_rgb, image_lab, left)))
+    if right_reason is None:
+        kept_pixel_sets.append(_trim_to_brighter_band(*_sclera_pixels(image_rgb, image_lab, right)))
+
+    if not kept_pixel_sets:
+        return ScleraSampleResult(success=False, error=left_reason or right_reason)
+
+    pooled = np.concatenate(kept_pixel_sets, axis=0)
+    if pooled.shape[0] < _MIN_SCLERA_PIXEL_COUNT:
+        return ScleraSampleResult(success=False, error="insufficient_pixels")
+
+    median_rgb = np.median(pooled, axis=0)
+    sclera_rgb = (int(round(median_rgb[0])), int(round(median_rgb[1])), int(round(median_rgb[2])))
+    return ScleraSampleResult(success=True, sclera_rgb=sclera_rgb)
 
 
 @lru_cache(maxsize=1)
@@ -274,4 +478,10 @@ def sample_skin_regions(image_bgr: np.ndarray) -> SkinSampleResult:
     largest_face = max(faces, key=_face_bbox_area)
 
     anchors = compute_anchor_points(largest_face)
-    return sample_at_anchors(image_bgr, anchors)
+    sample = sample_at_anchors(image_bgr, anchors)
+    if not sample.success:
+        return sample
+
+    image_lab = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2LAB)
+    sclera = sample_sclera(image_rgb, image_lab, largest_face)
+    return replace(sample, sclera=sclera)

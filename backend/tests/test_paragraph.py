@@ -14,6 +14,7 @@ def _classification() -> SeasonClassification:
         avg_lab=(40.0, 10.0, -5.0),
         hue_deg=300.0,
         chroma=11.0,
+        depth_lightness=40.0,
     )
 
 

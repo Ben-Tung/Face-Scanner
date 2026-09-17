@@ -50,7 +50,17 @@ def main() -> None:
     _print_patch("left_cheek", sample.left_cheek_rgb)
     _print_patch("right_cheek", sample.right_cheek_rgb)
 
-    result = classify_season(sample.forehead_rgb, sample.left_cheek_rgb, sample.right_cheek_rgb)
+    print()
+    sclera_rgb = None
+    if sample.sclera is None:
+        print("sclera       n/a (no landmark array reached this call)")
+    elif not sample.sclera.success:
+        print(f"sclera       unreliable: {sample.sclera.error} -> falling back to uncorrected L*")
+    else:
+        sclera_rgb = sample.sclera.sclera_rgb
+        _print_patch("sclera", sclera_rgb)
+
+    result = classify_season(sample.forehead_rgb, sample.left_cheek_rgb, sample.right_cheek_rgb, sclera_rgb=sclera_rgb)
     if not result.success:
         print()
         print(f"Classification failed: {result.error}")
@@ -58,16 +68,17 @@ def main() -> None:
 
     classification = result.classification
     print()
-    print(f"season    = {classification.season}")
-    print(f"undertone = {classification.undertone}")
-    print(f"depth     = {classification.depth}")
-    print(f"clarity   = {classification.clarity}")
+    print(f"season         = {classification.season}")
+    print(f"undertone      = {classification.undertone}")
+    print(f"depth          = {classification.depth}")
+    print(f"clarity        = {classification.clarity}")
     print(
-        f"avg_lab   = ({classification.avg_lab[0]:.2f}, {classification.avg_lab[1]:.2f}, "
+        f"avg_lab        = ({classification.avg_lab[0]:.2f}, {classification.avg_lab[1]:.2f}, "
         f"{classification.avg_lab[2]:.2f})"
     )
-    print(f"hue_deg   = {classification.hue_deg:.2f}")
-    print(f"chroma    = {classification.chroma:.2f}")
+    print(f"hue_deg        = {classification.hue_deg:.2f}")
+    print(f"chroma         = {classification.chroma:.2f}")
+    print(f"depth_lightness = {classification.depth_lightness:.2f}  (raw avg_lab L* = {classification.avg_lab[0]:.2f})")
 
 
 if __name__ == "__main__":

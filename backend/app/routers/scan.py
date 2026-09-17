@@ -164,7 +164,8 @@ async def scan(background_tasks: BackgroundTasks, photo: UploadFile = File(...))
             )
         raise HTTPException(status_code=422, detail=_SAMPLE_ERROR_MESSAGES[sample.error])
 
-    result = classify_season(sample.forehead_rgb, sample.left_cheek_rgb, sample.right_cheek_rgb)
+    sclera_rgb = sample.sclera.sclera_rgb if sample.sclera is not None and sample.sclera.success else None
+    result = classify_season(sample.forehead_rgb, sample.left_cheek_rgb, sample.right_cheek_rgb, sclera_rgb=sclera_rgb)
     if not result.success:
         assert sample.anchors is not None  # sampling succeeded, so anchors are always set
         log_event("scan_low_confidence", {"reason": "inconsistent_patches"})
@@ -183,7 +184,11 @@ async def scan(background_tasks: BackgroundTasks, photo: UploadFile = File(...))
     swatches = to_swatch_responses(SWATCHES_BY_SEASON[season])
     paragraph = generate_paragraph(result.classification, SWATCHES_BY_SEASON[season])
     scan_id = _persist_scan(season, swatches, paragraph)
-    background_tasks.add_task(log_event, "scan_completed", {"season": season, "scan_id": scan_id})
+    background_tasks.add_task(
+        log_event,
+        "scan_completed",
+        {"season": season, "scan_id": scan_id, "depth_normalized": sclera_rgb is not None},
+    )
     return ScanResponse(scan_id=scan_id, season=season, swatches=swatches, paragraph=paragraph)
 
 

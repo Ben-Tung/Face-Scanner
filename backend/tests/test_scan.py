@@ -272,7 +272,7 @@ def test_scan_reports_structured_detail_for_inconsistent_patches(monkeypatch):
     monkeypatch.setattr(
         scan_module,
         "classify_season",
-        lambda forehead_rgb, left_cheek_rgb, right_cheek_rgb: SeasonClassificationResult(
+        lambda forehead_rgb, left_cheek_rgb, right_cheek_rgb, sclera_rgb=None: SeasonClassificationResult(
             success=False, error="inconsistent_patches"
         ),
     )
