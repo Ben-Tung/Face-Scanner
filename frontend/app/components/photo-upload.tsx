@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 
+import { CameraCapture } from "@/app/components/camera-capture";
 import { HealthCheck } from "@/app/components/health-check";
 import { PatchAdjuster } from "@/app/components/patch-adjuster";
 import {
@@ -47,6 +48,7 @@ const RESCAN_STATUS_MESSAGE = "Rechecking your adjusted spots…";
 
 type State =
   | { kind: "empty" }
+  | { kind: "camera" }
   | { kind: "scanning"; previewUrl: string }
   | {
       kind: "review";
@@ -62,6 +64,17 @@ type State =
 
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Devices with a coarse (touch) primary pointer get the OS camera app via
+// the file input's capture="user" hint — it's the native, well-supported
+// path there. Devices with a fine pointer (typically no touch camera-app
+// hint support at all, e.g. desktop browsers) get an in-page live capture
+// instead, falling back to it too if getUserMedia simply isn't available.
+function prefersNativeCameraCapture(): boolean {
+  if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) return true;
+  if (typeof window === "undefined" || !window.matchMedia) return true;
+  return window.matchMedia("(pointer: coarse)").matches;
 }
 
 // A fresh key (the scan's previewUrl, always unique) mounts a new instance
@@ -127,12 +140,8 @@ export function PhotoUpload() {
   const libraryInputRef = useRef<HTMLInputElement>(null);
   const router = useRouter();
 
-  async function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    event.target.value = ""; // allow re-selecting the same file later
-    if (!file) return;
-
-    if (state.kind !== "empty") {
+  async function processFile(file: File) {
+    if (state.kind !== "empty" && state.kind !== "camera") {
       URL.revokeObjectURL(state.previewUrl);
     }
     const previewUrl = URL.createObjectURL(file);
@@ -158,6 +167,21 @@ export function PhotoUpload() {
       const message =
         error instanceof ScanError ? error.message : "Something went wrong. Please try again.";
       setState({ kind: "error", message, previewUrl });
+    }
+  }
+
+  async function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = ""; // allow re-selecting the same file later
+    if (!file) return;
+    await processFile(file);
+  }
+
+  function triggerSelfieCapture() {
+    if (prefersNativeCameraCapture()) {
+      selfieInputRef.current?.click();
+    } else {
+      setState({ kind: "camera" });
     }
   }
 
@@ -227,11 +251,7 @@ export function PhotoUpload() {
           </div>
 
           <div className="space-y-2">
-            <button
-              type="button"
-              onClick={() => selfieInputRef.current?.click()}
-              className={PRIMARY_BUTTON_CLASS}
-            >
+            <button type="button" onClick={triggerSelfieCapture} className={PRIMARY_BUTTON_CLASS}>
               Take a selfie
             </button>
             <button
@@ -247,6 +267,10 @@ export function PhotoUpload() {
         </div>
       )}
 
+      {state.kind === "camera" && (
+        <CameraCapture onCapture={processFile} onCancel={() => setState({ kind: "empty" })} />
+      )}
+
       {state.kind === "scanning" && <ScanningOverlay previewUrl={state.previewUrl} />}
 
       {state.kind === "review" && (
@@ -256,7 +280,7 @@ export function PhotoUpload() {
           initialPatches={state.patches}
           message={state.message}
           onSubmit={handlePatchSubmit}
-          onRetakeSelfie={() => selfieInputRef.current?.click()}
+          onRetakeSelfie={triggerSelfieCapture}
           onRetakeLibrary={() => libraryInputRef.current?.click()}
         />
       )}
@@ -274,11 +298,7 @@ export function PhotoUpload() {
             {state.message}
           </div>
           <div className="space-y-2">
-            <button
-              type="button"
-              onClick={() => selfieInputRef.current?.click()}
-              className={PRIMARY_BUTTON_CLASS}
-            >
+            <button type="button" onClick={triggerSelfieCapture} className={PRIMARY_BUTTON_CLASS}>
               Take a selfie
             </button>
             <button
