@@ -131,19 +131,23 @@ def set_full_report_paragraph(scan_id: str, paragraph: str) -> None:
         )
 
 
-def mark_scan_paid(scan_id: str, payment_intent_id: str | None) -> None:
+def mark_scan_paid(scan_id: str, payment_intent_id: str | None) -> bool:
     """Idempotent: safe to call more than once for the same scan (a
     redelivered webhook, or the webhook and the GET /api/scans/{id}
-    fallback-verify both confirming the same payment)."""
+    fallback-verify both confirming the same payment). Returns True only
+    for the call that actually transitions the scan to paid, so callers
+    can log a "purchase_completed" event exactly once rather than once
+    per confirmation path."""
     with _connect() as conn:
         _ensure_schema(conn)
-        conn.execute(
+        cur = conn.execute(
             """
             UPDATE scans
             SET paid = TRUE,
                 stripe_payment_intent_id = COALESCE(%s, stripe_payment_intent_id),
                 paid_at = COALESCE(paid_at, now())
-            WHERE id = %s
+            WHERE id = %s AND paid = FALSE
             """,
             (payment_intent_id, scan_id),
         )
+        return cur.rowcount > 0

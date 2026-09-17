@@ -109,12 +109,17 @@ def test_mark_scan_paid_is_idempotent(scan_id):
     # payment_intent, so calling this twice with the same id must be safe.
     scans_repo.create_scan(scan_id, "Autumn", [], None)
 
-    scans_repo.mark_scan_paid(scan_id, "pi_123")
-    scans_repo.mark_scan_paid(scan_id, "pi_123")
+    first = scans_repo.mark_scan_paid(scan_id, "pi_123")
+    second = scans_repo.mark_scan_paid(scan_id, "pi_123")
     row = scans_repo.get_scan(scan_id)
 
     assert row.paid is True
     assert row.stripe_payment_intent_id == "pi_123"
+    # Only the call that actually transitions the scan to paid returns
+    # True — callers use this to log a purchase_completed event exactly
+    # once even when both confirmation paths fire for the same payment.
+    assert first is True
+    assert second is False
 
 
 @pytest.mark.skipif(not _DB_REACHABLE, reason=_SKIP_REASON)

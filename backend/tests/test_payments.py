@@ -311,7 +311,11 @@ def test_webhook_marks_paid_and_logs_purchase_completed(monkeypatch):
 
     marked = []
     logged = []
-    monkeypatch.setattr(payments_module, "mark_scan_paid", lambda scan_id, pi: marked.append((scan_id, pi)))
+    monkeypatch.setattr(
+        payments_module,
+        "mark_scan_paid",
+        lambda scan_id, pi: marked.append((scan_id, pi)) or True,
+    )
     monkeypatch.setattr(payments_module, "log_event", lambda *a, **k: logged.append(a))
 
     response = client.post(
@@ -321,6 +325,32 @@ def test_webhook_marks_paid_and_logs_purchase_completed(monkeypatch):
     assert response.status_code == 200
     assert marked == [(_SCAN_ID, "pi_webhook")]
     assert logged and logged[0][0] == "purchase_completed"
+
+
+def test_webhook_does_not_relog_purchase_completed_for_an_already_paid_scan(monkeypatch):
+    """A redelivered webhook, or a webhook that lands after the
+    get_scan_state fallback already confirmed the same payment, must mark
+    paid idempotently but must NOT record a second purchase_completed
+    event — mark_scan_paid returns False once the scan is already paid,
+    which is exactly the signal the webhook uses to skip logging again."""
+    monkeypatch.setattr(payments_module, "get_settings", _configured_settings)
+
+    fake_event = _fake_event(
+        "checkout.session.completed",
+        _fake_session(metadata=SimpleNamespace(scan_id=_SCAN_ID), payment_intent="pi_webhook", id="cs_test_evt"),
+    )
+    monkeypatch.setattr(payments_module.stripe.Webhook, "construct_event", lambda *a, **k: fake_event)
+
+    logged = []
+    monkeypatch.setattr(payments_module, "mark_scan_paid", lambda *a, **k: False)
+    monkeypatch.setattr(payments_module, "log_event", lambda *a, **k: logged.append(a))
+
+    response = client.post(
+        "/api/stripe/webhook", content=b"{}", headers={"Stripe-Signature": "valid"}
+    )
+
+    assert response.status_code == 200
+    assert logged == []
 
 
 def test_webhook_ignores_unrecognized_event_types(monkeypatch):

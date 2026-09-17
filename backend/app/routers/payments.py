@@ -190,7 +190,11 @@ def _verify_and_mark_paid(row: ScanRow, session_id: str) -> bool:
     if session.payment_status != "paid" or scan_id != row.id:
         return False
 
-    mark_scan_paid(row.id, session.payment_intent)
+    if mark_scan_paid(row.id, session.payment_intent):
+        log_event(
+            "purchase_completed",
+            {"scan_id": row.id, "payment_intent_id": session.payment_intent},
+        )
     return True
 
 
@@ -290,10 +294,10 @@ async def stripe_webhook(
         # its own backoff schedule, giving payment confirmation another
         # chance to land on top of (not instead of) get_scan_state's
         # fallback verification above.
-        mark_scan_paid(scan_id, session.payment_intent)
-        log_event(
-            "purchase_completed",
-            {"scan_id": scan_id, "payment_intent_id": session.payment_intent},
-        )
+        if mark_scan_paid(scan_id, session.payment_intent):
+            log_event(
+                "purchase_completed",
+                {"scan_id": scan_id, "payment_intent_id": session.payment_intent},
+            )
 
     return {"status": "ok"}
