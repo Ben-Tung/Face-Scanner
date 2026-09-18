@@ -6,12 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { CameraCapture } from "@/app/components/camera-capture";
 import { HealthCheck } from "@/app/components/health-check";
 import { PatchAdjuster } from "@/app/components/patch-adjuster";
-import {
-  CARD_CLASS,
-  PRIMARY_BUTTON_CLASS,
-  SECONDARY_BUTTON_CLASS,
-  SPINNER_CLASS,
-} from "@/app/components/ui";
+import { CARD_CLASS, PRIMARY_BUTTON_CLASS, SECONDARY_BUTTON_CLASS } from "@/app/components/ui";
 import {
   LowConfidenceScanError,
   ScanError,
@@ -34,17 +29,35 @@ const LIGHTING_TIPS = [
   "Hold the phone at eye level, about an arm's length away",
 ] as const;
 
-const SCAN_STATUS_MESSAGES = [
+// Face detection and color classification (backend/app/vision) are fast and
+// close to constant-time regardless of the photo. What actually makes scans
+// take anywhere from ~1s to ~15s is the personalized write-up: both the
+// fresh-scan and rescan endpoints await a live Anthropic API call inline
+// before responding, and that call's latency varies with the API itself
+// (worst case: an 8s timeout plus one retry). These messages reflect that —
+// a fixed sequence for the fast, true stages, then an honest indefinite pool
+// once we're plausibly waiting on the write-up.
+const EARLY_SCAN_MESSAGES = [
   "Finding your face…",
   "Reading your undertones…",
   "Matching your season…",
 ] as const;
-const STATUS_INTERVAL_MS = 650;
-// Held for at least as long as every status message gets a turn, so the
-// animation never flashes even though the actual classification is fast.
-const MIN_SCANNING_MS = SCAN_STATUS_MESSAGES.length * STATUS_INTERVAL_MS;
+const EARLY_INTERVAL_MS = 1100;
 
-const RESCAN_STATUS_MESSAGE = "Rechecking your adjusted spots…";
+const RESCAN_MESSAGES = ["Rechecking your adjusted spots…"] as const;
+const RESCAN_INTERVAL_MS = 1400;
+
+const LATER_STATUS_MESSAGES = [
+  "Writing something personal about your colors…",
+  "Almost there…",
+  "Just putting on the finishing touches…",
+] as const;
+const LATER_INTERVAL_MS = 2600;
+
+// Held for at least as long as the fast-stage messages get a full turn, so
+// the overlay never flashes even when the backend short-circuits quickly
+// (e.g. a low-confidence photo, which skips the AI call entirely).
+const MIN_SCANNING_MS = EARLY_SCAN_MESSAGES.length * EARLY_INTERVAL_MS;
 
 type State =
   | { kind: "empty" }
@@ -77,21 +90,39 @@ function prefersNativeCameraCapture(): boolean {
   return window.matchMedia("(pointer: coarse)").matches;
 }
 
+// Walks through `leadMessages` at `leadIntervalMs` once, then loops
+// LATER_STATUS_MESSAGES indefinitely at the slower LATER_INTERVAL_MS — the
+// lead messages match real, fast, near-constant backend stages, so they
+// only need to play once; the later pool covers however long the AI
+// write-up call ends up taking, without ever implying it's stuck or restart
+// the story from the top.
+function useStatusMessage(leadMessages: readonly string[], leadIntervalMs: number): string {
+  const [index, setIndex] = useState(0);
+  const leadCount = leadMessages.length;
+  const totalCount = leadCount + LATER_STATUS_MESSAGES.length;
+
+  useEffect(() => {
+    const holdMs = index < leadCount ? leadIntervalMs : LATER_INTERVAL_MS;
+    const id = setTimeout(() => {
+      setIndex((i) => (i + 1 < totalCount ? i + 1 : leadCount));
+    }, holdMs);
+    return () => clearTimeout(id);
+  }, [index, leadCount, totalCount, leadIntervalMs]);
+
+  return index < leadCount ? leadMessages[index] : LATER_STATUS_MESSAGES[index - leadCount];
+}
+
 // A fresh key (the scan's previewUrl, always unique) mounts a new instance
 // of this per scan, so the cycling status naturally restarts at index 0
 // without needing to reset state from inside the effect.
-function ScanStatusMessage() {
-  const [index, setIndex] = useState(0);
-
-  useEffect(() => {
-    const id = setInterval(
-      () => setIndex((i) => (i + 1) % SCAN_STATUS_MESSAGES.length),
-      STATUS_INTERVAL_MS,
-    );
-    return () => clearInterval(id);
-  }, []);
-
-  const message = SCAN_STATUS_MESSAGES[index];
+function ScanStatusMessage({
+  leadMessages,
+  leadIntervalMs,
+}: {
+  leadMessages: readonly string[];
+  leadIntervalMs: number;
+}) {
+  const message = useStatusMessage(leadMessages, leadIntervalMs);
   return (
     <p key={message} className="animate-fade-in text-sm font-medium" aria-live="polite">
       {message}
@@ -99,17 +130,47 @@ function ScanStatusMessage() {
   );
 }
 
-// Shared blurred-preview-plus-spinner treatment for both the initial scan
-// and a patch-adjustment resubmit. A static `statusMessage` (the resubmit
-// case — we already know where the face is, so the "Finding your face…"
-// cycle doesn't fit) skips the cycling text; omitting it keeps the
-// original cycling behavior for a fresh scan.
+// A simulated, not backend-driven, progress indicator: the backend has no
+// streaming/progress signal today (a single plain request/response), and
+// its one genuinely slow, variable step (the inline AI write-up call) isn't
+// otherwise observable mid-flight. Easing up toward — but deliberately
+// never reaching — full over several seconds reads as real, ongoing
+// progress without claiming a precision we don't have; it settles near-full
+// and just holds there until the real response arrives and this unmounts.
+function ScanProgressBar() {
+  const [filled, setFilled] = useState(false);
+
+  useEffect(() => {
+    const id = setTimeout(() => setFilled(true), 50);
+    return () => clearTimeout(id);
+  }, []);
+
+  return (
+    <div
+      aria-hidden
+      className="h-1.5 w-full overflow-hidden rounded-full bg-black/10 dark:bg-white/10"
+    >
+      <div
+        className="h-full rounded-full bg-black transition-[width] duration-[8000ms] ease-out dark:bg-white"
+        style={{ width: filled ? "92%" : "6%" }}
+      />
+    </div>
+  );
+}
+
+// Shared blurred-preview-plus-progress treatment for both the initial scan
+// and a patch-adjustment resubmit — both hit the same slow, variable AI
+// write-up call server-side, so both get the same easing progress bar and
+// the same "fast lead messages, then an honest indefinite pool" messaging,
+// just with different lead messages for the two cases.
 function ScanningOverlay({
   previewUrl,
-  statusMessage,
+  leadMessages,
+  leadIntervalMs = EARLY_INTERVAL_MS,
 }: {
   previewUrl: string;
-  statusMessage?: string;
+  leadMessages: readonly string[];
+  leadIntervalMs?: number;
 }) {
   return (
     <div className="relative aspect-square w-full overflow-hidden rounded-xl">
@@ -121,14 +182,14 @@ function ScanningOverlay({
         className="h-full w-full scale-105 object-cover opacity-40 blur-sm"
       />
       <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-6 text-center">
-        <span className={SPINNER_CLASS} />
-        {statusMessage ? (
-          <p className="animate-fade-in text-sm font-medium" aria-live="polite">
-            {statusMessage}
-          </p>
-        ) : (
-          <ScanStatusMessage key={previewUrl} />
-        )}
+        <div className="w-full max-w-[220px]">
+          <ScanProgressBar key={previewUrl} />
+        </div>
+        <ScanStatusMessage
+          key={previewUrl}
+          leadMessages={leadMessages}
+          leadIntervalMs={leadIntervalMs}
+        />
       </div>
     </div>
   );
@@ -271,7 +332,9 @@ export function PhotoUpload() {
         <CameraCapture onCapture={processFile} onCancel={() => setState({ kind: "empty" })} />
       )}
 
-      {state.kind === "scanning" && <ScanningOverlay previewUrl={state.previewUrl} />}
+      {state.kind === "scanning" && (
+        <ScanningOverlay previewUrl={state.previewUrl} leadMessages={EARLY_SCAN_MESSAGES} />
+      )}
 
       {state.kind === "review" && (
         <PatchAdjuster
@@ -286,7 +349,11 @@ export function PhotoUpload() {
       )}
 
       {state.kind === "rescanning" && (
-        <ScanningOverlay previewUrl={state.previewUrl} statusMessage={RESCAN_STATUS_MESSAGE} />
+        <ScanningOverlay
+          previewUrl={state.previewUrl}
+          leadMessages={RESCAN_MESSAGES}
+          leadIntervalMs={RESCAN_INTERVAL_MS}
+        />
       )}
 
       {state.kind === "error" && (
