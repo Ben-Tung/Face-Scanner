@@ -13,7 +13,6 @@ after redirect, a session_id — never a "paid" boolean, never an amount.
 from __future__ import annotations
 
 import logging
-import uuid
 from collections.abc import Sequence
 from typing import Any, Literal
 
@@ -33,7 +32,7 @@ from app.scans_repo import (
     set_checkout_session,
     set_full_report_paragraph,
 )
-from app.schemas import SwatchResponse, to_swatch_responses
+from app.schemas import SwatchResponse, parse_scan_id_or_404, to_swatch_responses
 from app.vision.season_classifier import Season
 
 logger = logging.getLogger(__name__)
@@ -79,19 +78,13 @@ class ScanStateResponse(BaseModel):
     swatches: list[SwatchResponse]
     paragraph: str | None
     paid: bool
+    retake_used: bool
     price_cents: int
     full_report: FullReportResponse | None = None
 
 
 class CheckoutResponse(BaseModel):
     checkout_url: str
-
-
-def _parse_scan_id(scan_id: str) -> str:
-    try:
-        return str(uuid.UUID(scan_id))
-    except ValueError:
-        raise HTTPException(status_code=404, detail="Scan not found.")
 
 
 def _swatches_response(row: ScanRow) -> list[SwatchResponse]:
@@ -155,6 +148,7 @@ def _scan_state_response(row: ScanRow, paid: bool) -> ScanStateResponse:
         swatches=swatches,
         paragraph=row.paragraph,
         paid=paid,
+        retake_used=row.retake_used,
         price_cents=_FULL_REPORT_PRICE_CENTS,
         full_report=full_report,
     )
@@ -200,7 +194,7 @@ def _verify_and_mark_paid(row: ScanRow, session_id: str) -> bool:
 
 @router.get("/scans/{scan_id}", response_model=ScanStateResponse)
 def get_scan_state(scan_id: str, session_id: str | None = None) -> ScanStateResponse:
-    scan_id = _parse_scan_id(scan_id)
+    scan_id = parse_scan_id_or_404(scan_id)
     row = get_scan(scan_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Scan not found.")
@@ -216,7 +210,7 @@ def get_scan_state(scan_id: str, session_id: str | None = None) -> ScanStateResp
 
 @router.post("/scans/{scan_id}/checkout", response_model=CheckoutResponse)
 def create_checkout(scan_id: str) -> CheckoutResponse:
-    scan_id = _parse_scan_id(scan_id)
+    scan_id = parse_scan_id_or_404(scan_id)
     row = get_scan(scan_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Scan not found.")

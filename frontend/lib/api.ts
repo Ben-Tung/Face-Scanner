@@ -55,6 +55,7 @@ export type ScanState = {
   swatches: ScanSwatch[];
   paragraph: string | null;
   paid: boolean;
+  retakeUsed: boolean;
   priceCents: number;
   fullReport: FullReport | null;
 };
@@ -225,6 +226,7 @@ type ScanStateBody = {
   swatches: ScanSwatch[];
   paragraph: string | null;
   paid: boolean;
+  retake_used: boolean;
   price_cents: number;
   full_report: FullReportBody | null;
 };
@@ -273,9 +275,32 @@ export async function getScan(scanId: string, sessionId?: string): Promise<ScanS
     swatches: body.swatches,
     paragraph: body.paragraph,
     paid: body.paid,
+    retakeUsed: body.retake_used,
     priceCents: body.price_cents,
     fullReport: body.full_report ? mapFullReport(body.full_report) : null,
   };
+}
+
+/** Consume a paid scan's one free retake: re-run the pipeline against a new
+ * photo and overwrite that scan's stored result. The retake endpoint itself
+ * only returns the free-tier shape (season/swatches/paragraph) — the paid
+ * full report is entirely season-derived server-side, so this re-fetches
+ * getScan afterward to get a fully consistent result, including a freshly
+ * regenerated (not stale) AI paragraph for the new season. */
+export async function retakeScan(scanId: string, file: File): Promise<ScanState> {
+  const formData = new FormData();
+  formData.append("photo", file);
+
+  const response = await fetch(apiUrl(`/api/scans/${scanId}/retake`), {
+    method: "POST",
+    body: formData,
+  });
+
+  if (!response.ok) {
+    throw await parseScanErrorBody(response);
+  }
+
+  return getScan(scanId);
 }
 
 /** Start a one-time Stripe Checkout session to unlock a scan's full

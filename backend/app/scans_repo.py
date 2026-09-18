@@ -46,6 +46,7 @@ class ScanRow:
     stripe_checkout_session_id: str | None
     stripe_payment_intent_id: str | None
     full_report_paragraph: str | None
+    retake_used: bool = False
 
 
 def _connect() -> psycopg.Connection:
@@ -72,6 +73,7 @@ def _ensure_schema(conn: psycopg.Connection) -> None:
         # each its own conn.execute() call since psycopg3 doesn't reliably
         # run multiple statements passed to a single execute().
         conn.execute("ALTER TABLE scans ADD COLUMN IF NOT EXISTS full_report_paragraph TEXT")
+        conn.execute("ALTER TABLE scans ADD COLUMN IF NOT EXISTS retake_used BOOLEAN NOT NULL DEFAULT FALSE")
         _schema_ready = True
 
 
@@ -91,7 +93,7 @@ def get_scan(scan_id: str) -> ScanRow | None:
             """
             SELECT id, season, swatches, paragraph, paid,
                    stripe_checkout_session_id, stripe_payment_intent_id,
-                   full_report_paragraph
+                   full_report_paragraph, retake_used
             FROM scans WHERE id = %s
             """,
             (scan_id,),
@@ -108,6 +110,7 @@ def get_scan(scan_id: str) -> ScanRow | None:
         stripe_checkout_session_id=row[5],
         stripe_payment_intent_id=row[6],
         full_report_paragraph=row[7],
+        retake_used=row[8],
     )
 
 
@@ -129,6 +132,35 @@ def set_full_report_paragraph(scan_id: str, paragraph: str) -> None:
             "UPDATE scans SET full_report_paragraph = %s WHERE id = %s",
             (paragraph, scan_id),
         )
+
+
+def consume_retake(scan_id: str, season: Season, swatches: list[dict[str, Any]], paragraph: str | None) -> bool:
+    """Atomically overwrites the scan's result and consumes its one free
+    retake. Returns True only for the call that actually consumes it, so a
+    second concurrent/duplicate attempt gets a clean rejection instead of
+    silently succeeding twice — mirrors mark_scan_paid's contract.
+
+    full_report_paragraph is unconditionally nulled in the same statement:
+    it's a cached AI paragraph describing the OLD season's best colors, so
+    it must never survive a season change. The next paid-report read
+    regenerates and re-caches it via the existing lazy-generation path in
+    app/routers/payments.py.
+    """
+    with _connect() as conn:
+        _ensure_schema(conn)
+        cur = conn.execute(
+            """
+            UPDATE scans
+            SET season = %s,
+                swatches = %s,
+                paragraph = %s,
+                retake_used = TRUE,
+                full_report_paragraph = NULL
+            WHERE id = %s AND paid = TRUE AND retake_used = FALSE
+            """,
+            (season, Jsonb(swatches), paragraph, scan_id),
+        )
+        return cur.rowcount > 0
 
 
 def mark_scan_paid(scan_id: str, payment_intent_id: str | None) -> bool:

@@ -12,8 +12,8 @@ from pydantic import BaseModel
 from app.analytics import log_event
 from app.palettes import SWATCHES_BY_SEASON
 from app.paragraph import generate_paragraph
-from app.scans_repo import create_scan
-from app.schemas import SwatchResponse, to_swatch_responses
+from app.scans_repo import consume_retake, create_scan, get_scan
+from app.schemas import SwatchResponse, parse_scan_id_or_404, to_swatch_responses
 from app.vision.season_classifier import Season, classify_season
 from app.vision.skin_sampling import AnchorPoints, sample_at_anchors, sample_skin_regions
 
@@ -265,4 +265,81 @@ async def scan_manual(
     background_tasks.add_task(
         log_event, "scan_manual_completed", {"season": season, "scan_id": scan_id}
     )
+    return ScanResponse(scan_id=scan_id, season=season, swatches=swatches, paragraph=paragraph)
+
+
+@router.post("/scans/{scan_id}/retake", response_model=ScanResponse)
+async def retake_scan(
+    background_tasks: BackgroundTasks, scan_id: str, photo: UploadFile = File(...)
+) -> ScanResponse:
+    """Re-run the full pipeline against a new photo for a paid scan's one
+    included free retake, overwriting that scan's stored result in place.
+
+    The upfront paid/retake_used checks below are a UX fast-fail only — they
+    let an obviously-doomed request fail before spending time decoding the
+    photo and running the pipeline. They are NOT the concurrency guard: two
+    requests can both pass them and both run the pipeline, so the actual
+    safety property (at most one retake ever gets consumed) comes entirely
+    from consume_retake's atomic conditional UPDATE, re-checked fresh after
+    the pipeline finishes. A face-detection or classification failure (422)
+    returns before consume_retake is ever called, so a failed attempt never
+    consumes the retake and never touches the scan's existing result.
+    """
+    scan_id = parse_scan_id_or_404(scan_id)
+    row = get_scan(scan_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Scan not found.")
+    if not row.paid:
+        raise HTTPException(status_code=403, detail="This scan hasn't been unlocked yet.")
+    if row.retake_used:
+        raise HTTPException(status_code=409, detail="You've already used your free retake for this scan.")
+
+    image_bgr = await _read_and_decode_photo(photo)
+    log_event("retake_started", {"scan_id": scan_id})
+    height, width = image_bgr.shape[:2]
+
+    sample = sample_skin_regions(image_bgr)
+    if not sample.success:
+        if sample.error == "patch_clipped":
+            assert sample.anchors is not None  # patch_clipped always carries anchors
+            log_event("scan_low_confidence", {"reason": "patch_clipped", "retake": True})
+            raise HTTPException(
+                status_code=422,
+                detail=_low_confidence_detail(
+                    "patch_clipped", _SAMPLE_ERROR_MESSAGES["patch_clipped"], sample.anchors, width, height
+                ),
+            )
+        raise HTTPException(status_code=422, detail=_SAMPLE_ERROR_MESSAGES[sample.error])
+
+    sclera_rgb = sample.sclera.sclera_rgb if sample.sclera is not None and sample.sclera.success else None
+    result = classify_season(sample.forehead_rgb, sample.left_cheek_rgb, sample.right_cheek_rgb, sclera_rgb=sclera_rgb)
+    if not result.success:
+        assert sample.anchors is not None  # sampling succeeded, so anchors are always set
+        log_event("scan_low_confidence", {"reason": "inconsistent_patches", "retake": True})
+        raise HTTPException(
+            status_code=422,
+            detail=_low_confidence_detail(
+                "inconsistent_patches",
+                _CLASSIFY_ERROR_MESSAGES["inconsistent_patches"],
+                sample.anchors,
+                width,
+                height,
+            ),
+        )
+
+    season = result.classification.season
+    swatches = to_swatch_responses(SWATCHES_BY_SEASON[season])
+    paragraph = generate_paragraph(result.classification, SWATCHES_BY_SEASON[season])
+
+    try:
+        consumed = consume_retake(scan_id, season, [s.model_dump() for s in swatches], paragraph)
+    except Exception:
+        logger.exception("Failed to persist retake for scan %r", scan_id)
+        raise HTTPException(
+            status_code=503, detail="We couldn't save your retake right now. Please try again."
+        )
+    if not consumed:
+        raise HTTPException(status_code=409, detail="You've already used your free retake for this scan.")
+
+    background_tasks.add_task(log_event, "retake_completed", {"season": season, "scan_id": scan_id})
     return ScanResponse(scan_id=scan_id, season=season, swatches=swatches, paragraph=paragraph)

@@ -14,6 +14,7 @@ import {
 } from "@/lib/api";
 import { ColorChip } from "./color-chip";
 import { FullReportView } from "./full-report-view";
+import { RetakeCapture } from "./retake-capture";
 import { PRIMARY_BUTTON_CLASS, SPINNER_CLASS } from "./ui";
 
 type ViewState =
@@ -126,7 +127,15 @@ export function ScanResultView() {
       </div>
 
       {scan.paid && scan.fullReport ? (
-        <FullReportView fullReport={scan.fullReport} />
+        <>
+          <FullReportView fullReport={scan.fullReport} />
+          {!scan.retakeUsed && (
+            <RetakeCapture
+              scanId={scan.scanId}
+              onSuccess={(updatedScan) => setState({ kind: "loaded", scan: updatedScan })}
+            />
+          )}
+        </>
       ) : (
         <>
           {scan.paragraph && (

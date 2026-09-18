@@ -82,6 +82,7 @@ def test_create_and_get_scan_round_trip(scan_id):
     assert row.stripe_checkout_session_id is None
     assert row.stripe_payment_intent_id is None
     assert row.full_report_paragraph is None
+    assert row.retake_used is False
 
 
 @pytest.mark.skipif(not _DB_REACHABLE, reason=_SKIP_REASON)
@@ -142,3 +143,48 @@ def test_mark_scan_paid_does_not_null_out_an_existing_payment_intent(scan_id):
 
     assert row.paid is True
     assert row.stripe_payment_intent_id == "pi_123"
+
+
+@pytest.mark.skipif(not _DB_REACHABLE, reason=_SKIP_REASON)
+def test_consume_retake_is_concurrency_safe(scan_id):
+    # Two concurrent retake requests both racing to consume the same scan's
+    # one free retake must not both succeed — mirrors
+    # test_mark_scan_paid_is_idempotent's shape for the same reason.
+    scans_repo.create_scan(scan_id, "Autumn", [], None)
+    scans_repo.mark_scan_paid(scan_id, "pi_123")
+
+    first = scans_repo.consume_retake(scan_id, "Winter", [{"name": "True Red", "hex": "#D0103A"}], "First retake.")
+    second = scans_repo.consume_retake(scan_id, "Spring", [{"name": "Coral", "hex": "#FF7F50"}], "Second retake.")
+    row = scans_repo.get_scan(scan_id)
+
+    assert first is True
+    assert second is False
+    assert row.retake_used is True
+    assert row.season == "Winter"
+    assert row.paragraph == "First retake."
+
+
+@pytest.mark.skipif(not _DB_REACHABLE, reason=_SKIP_REASON)
+def test_consume_retake_nulls_stale_full_report_paragraph(scan_id):
+    # full_report_paragraph is a cached AI paragraph describing the OLD
+    # season's best colors, so it must never survive a season change.
+    scans_repo.create_scan(scan_id, "Autumn", [], None)
+    scans_repo.mark_scan_paid(scan_id, "pi_123")
+    scans_repo.set_full_report_paragraph(scan_id, "Your Autumn palette runs warm and rich.")
+
+    scans_repo.consume_retake(scan_id, "Winter", [], "New season, new you.")
+    row = scans_repo.get_scan(scan_id)
+
+    assert row.full_report_paragraph is None
+
+
+@pytest.mark.skipif(not _DB_REACHABLE, reason=_SKIP_REASON)
+def test_consume_retake_returns_false_for_unpaid_scan(scan_id):
+    scans_repo.create_scan(scan_id, "Autumn", [], None)
+
+    consumed = scans_repo.consume_retake(scan_id, "Winter", [], "Should not persist.")
+    row = scans_repo.get_scan(scan_id)
+
+    assert consumed is False
+    assert row.season == "Autumn"
+    assert row.retake_used is False
