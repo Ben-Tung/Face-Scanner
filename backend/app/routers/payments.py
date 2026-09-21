@@ -23,6 +23,7 @@ from pydantic import BaseModel
 from app.analytics import log_event
 from app.beauty_guidance import GOLD_SWATCH, GUIDANCE_BY_SEASON, SILVER_SWATCH, BeautyGuidance
 from app.config import get_settings
+from app.confirmation_email import send_confirmation_email
 from app.palettes import FULL_PALETTE_BY_SEASON, Swatch
 from app.paragraph import generate_full_report_paragraph
 from app.scans_repo import (
@@ -293,5 +294,21 @@ async def stripe_webhook(
                 "purchase_completed",
                 {"scan_id": scan_id, "payment_intent_id": session.payment_intent},
             )
+
+            # Stripe Checkout collects this by default; not persisted
+            # anywhere, so this webhook is the only place it's ever
+            # available. customer_details is an optional nested object on
+            # the session — same defensive getattr style already used for
+            # metadata.scan_id above.
+            customer_email = getattr(getattr(session, "customer_details", None), "email", None)
+            if customer_email:
+                result_url = f"{settings.frontend_base_url}/result/{scan_id}"
+                send_confirmation_email(customer_email, result_url)
+            else:
+                logger.warning(
+                    "checkout.session.completed with no customer email (session %r, scan %r)",
+                    session.id,
+                    scan_id,
+                )
 
     return {"status": "ok"}

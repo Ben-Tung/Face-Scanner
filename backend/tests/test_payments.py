@@ -301,22 +301,35 @@ def test_webhook_rejects_bad_signature(monkeypatch):
 
 
 def test_webhook_marks_paid_and_logs_purchase_completed(monkeypatch):
-    monkeypatch.setattr(payments_module, "get_settings", _configured_settings)
+    monkeypatch.setattr(
+        payments_module, "get_settings", lambda: _configured_settings(resend_api_key="re_test_fake")
+    )
 
     fake_event = _fake_event(
         "checkout.session.completed",
-        _fake_session(metadata=SimpleNamespace(scan_id=_SCAN_ID), payment_intent="pi_webhook", id="cs_test_evt"),
+        _fake_session(
+            metadata=SimpleNamespace(scan_id=_SCAN_ID),
+            payment_intent="pi_webhook",
+            id="cs_test_evt",
+            customer_details=SimpleNamespace(email="customer@example.com"),
+        ),
     )
     monkeypatch.setattr(payments_module.stripe.Webhook, "construct_event", lambda *a, **k: fake_event)
 
     marked = []
     logged = []
+    emailed = []
     monkeypatch.setattr(
         payments_module,
         "mark_scan_paid",
         lambda scan_id, pi: marked.append((scan_id, pi)) or True,
     )
     monkeypatch.setattr(payments_module, "log_event", lambda *a, **k: logged.append(a))
+    monkeypatch.setattr(
+        payments_module,
+        "send_confirmation_email",
+        lambda to_email, result_url: emailed.append((to_email, result_url)),
+    )
 
     response = client.post(
         "/api/stripe/webhook", content=b"{}", headers={"Stripe-Signature": "valid"}
@@ -325,6 +338,7 @@ def test_webhook_marks_paid_and_logs_purchase_completed(monkeypatch):
     assert response.status_code == 200
     assert marked == [(_SCAN_ID, "pi_webhook")]
     assert logged and logged[0][0] == "purchase_completed"
+    assert emailed == [("customer@example.com", f"http://localhost:3000/result/{_SCAN_ID}")]
 
 
 def test_webhook_does_not_relog_purchase_completed_for_an_already_paid_scan(monkeypatch):
@@ -351,6 +365,98 @@ def test_webhook_does_not_relog_purchase_completed_for_an_already_paid_scan(monk
 
     assert response.status_code == 200
     assert logged == []
+
+
+def test_webhook_does_not_resend_confirmation_email_for_an_already_paid_scan(monkeypatch):
+    """Mirrors the purchase_completed idempotency test above: a redelivered
+    webhook (mark_scan_paid returns False) must not trigger a second
+    confirmation email either."""
+    monkeypatch.setattr(
+        payments_module, "get_settings", lambda: _configured_settings(resend_api_key="re_test_fake")
+    )
+
+    fake_event = _fake_event(
+        "checkout.session.completed",
+        _fake_session(
+            metadata=SimpleNamespace(scan_id=_SCAN_ID),
+            payment_intent="pi_webhook",
+            id="cs_test_evt",
+            customer_details=SimpleNamespace(email="customer@example.com"),
+        ),
+    )
+    monkeypatch.setattr(payments_module.stripe.Webhook, "construct_event", lambda *a, **k: fake_event)
+
+    monkeypatch.setattr(payments_module, "mark_scan_paid", lambda *a, **k: False)
+    monkeypatch.setattr(payments_module, "log_event", lambda *a, **k: None)
+    monkeypatch.setattr(
+        payments_module, "send_confirmation_email", lambda *a, **k: pytest.fail("must not be called")
+    )
+
+    response = client.post(
+        "/api/stripe/webhook", content=b"{}", headers={"Stripe-Signature": "valid"}
+    )
+
+    assert response.status_code == 200
+
+
+def test_webhook_skips_confirmation_email_when_customer_details_missing(monkeypatch):
+    """customer_details can be absent entirely on a session (distinct from
+    being present with a null email, tested below) — both must be handled
+    without failing the webhook."""
+    monkeypatch.setattr(
+        payments_module, "get_settings", lambda: _configured_settings(resend_api_key="re_test_fake")
+    )
+
+    fake_event = _fake_event(
+        "checkout.session.completed",
+        _fake_session(metadata=SimpleNamespace(scan_id=_SCAN_ID), payment_intent="pi_webhook", id="cs_test_evt"),
+    )
+    monkeypatch.setattr(payments_module.stripe.Webhook, "construct_event", lambda *a, **k: fake_event)
+
+    monkeypatch.setattr(payments_module, "mark_scan_paid", lambda *a, **k: True)
+    monkeypatch.setattr(payments_module, "log_event", lambda *a, **k: None)
+    monkeypatch.setattr(
+        payments_module, "send_confirmation_email", lambda *a, **k: pytest.fail("must not be called")
+    )
+
+    response = client.post(
+        "/api/stripe/webhook", content=b"{}", headers={"Stripe-Signature": "valid"}
+    )
+
+    assert response.status_code == 200
+
+
+def test_webhook_skips_confirmation_email_when_customer_email_is_null(monkeypatch):
+    """Stripe can populate customer_details while leaving .email null — a
+    documented case distinct from customer_details being absent entirely,
+    reached via a different Stripe code path, so it gets its own test even
+    though the same getattr chain handles both identically."""
+    monkeypatch.setattr(
+        payments_module, "get_settings", lambda: _configured_settings(resend_api_key="re_test_fake")
+    )
+
+    fake_event = _fake_event(
+        "checkout.session.completed",
+        _fake_session(
+            metadata=SimpleNamespace(scan_id=_SCAN_ID),
+            payment_intent="pi_webhook",
+            id="cs_test_evt",
+            customer_details=SimpleNamespace(email=None),
+        ),
+    )
+    monkeypatch.setattr(payments_module.stripe.Webhook, "construct_event", lambda *a, **k: fake_event)
+
+    monkeypatch.setattr(payments_module, "mark_scan_paid", lambda *a, **k: True)
+    monkeypatch.setattr(payments_module, "log_event", lambda *a, **k: None)
+    monkeypatch.setattr(
+        payments_module, "send_confirmation_email", lambda *a, **k: pytest.fail("must not be called")
+    )
+
+    response = client.post(
+        "/api/stripe/webhook", content=b"{}", headers={"Stripe-Signature": "valid"}
+    )
+
+    assert response.status_code == 200
 
 
 def test_webhook_ignores_unrecognized_event_types(monkeypatch):

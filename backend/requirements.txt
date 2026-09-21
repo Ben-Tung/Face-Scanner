@@ -22,6 +22,10 @@ anthropic~=1.5
 # Stripe Checkout for the one-time full-report unlock
 stripe~=15.6
 
+# Resend for the post-purchase confirmation email (best-effort, see
+# app/confirmation_email.py) — never blocks checkout if unset/erroring
+resend~=2.47
+
 # Test-only
 pytest~=8.3
 httpx~=0.28

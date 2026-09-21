@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     # since Checkout needs *some* value even in a bare local run.
     frontend_base_url: str = "http://localhost:3000"
 
+    # Best-effort: app/confirmation_email.py no-ops (returns False) when
+    # this is unset. A purchase confirmation email must never block or
+    # fail the Stripe webhook that already confirmed payment.
+    resend_api_key: str | None = None
+
 
 @lru_cache
 def get_settings() -> Settings:
