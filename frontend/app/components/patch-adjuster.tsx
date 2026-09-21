@@ -22,6 +22,26 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
 }
 
+function clampPoint(point: PatchPoint, half: number, image: ScanImageInfo): PatchPoint {
+  return {
+    x: clamp(point.x, half, image.width - half),
+    y: clamp(point.y, half, image.height - half),
+  };
+}
+
+// face_out_of_frame anchors arrive at/beyond the image edge by definition —
+// clamp them into bounds up front so every box starts visible and
+// draggable, regardless of which failure reason triggered the adjuster.
+function clampPatches(patches: PatchAnchors, image: ScanImageInfo): PatchAnchors {
+  const half = patches.patchHalfSize;
+  return {
+    forehead: clampPoint(patches.forehead, half, image),
+    leftCheek: clampPoint(patches.leftCheek, half, image),
+    rightCheek: clampPoint(patches.rightCheek, half, image),
+    patchHalfSize: half,
+  };
+}
+
 type PatchAdjusterProps = {
   previewUrl: string;
   image: ScanImageInfo;
@@ -45,7 +65,7 @@ export function PatchAdjuster({
   onRetakeSelfie,
   onRetakeLibrary,
 }: PatchAdjusterProps) {
-  const [patches, setPatches] = useState<PatchAnchors>(initialPatches);
+  const [patches, setPatches] = useState<PatchAnchors>(() => clampPatches(initialPatches, image));
   const imgRef = useRef<HTMLImageElement>(null);
 
   function movePatch(key: PatchKey, clientX: number, clientY: number) {

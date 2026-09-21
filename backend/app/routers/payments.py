@@ -299,8 +299,13 @@ async def stripe_webhook(
             # anywhere, so this webhook is the only place it's ever
             # available. customer_details is an optional nested object on
             # the session — same defensive getattr style already used for
-            # metadata.scan_id above.
-            customer_email = getattr(getattr(session, "customer_details", None), "email", None)
+            # metadata.scan_id above. Falls back to the session's top-level
+            # customer_email (populated when Stripe already knew the
+            # customer's email before checkout) so a null/absent
+            # customer_details.email doesn't silently drop the email.
+            customer_email = getattr(
+                getattr(session, "customer_details", None), "email", None
+            ) or getattr(session, "customer_email", None)
             if customer_email:
                 result_url = f"{settings.frontend_base_url}/result/{scan_id}"
                 send_confirmation_email(customer_email, result_url)

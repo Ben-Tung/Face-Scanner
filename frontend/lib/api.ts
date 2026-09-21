@@ -77,7 +77,7 @@ export type ScanImageInfo = {
   height: number;
 };
 
-export type LowConfidenceReason = "patch_clipped" | "inconsistent_patches";
+export type LowConfidenceReason = "patch_clipped" | "inconsistent_patches" | "face_out_of_frame";
 
 export class ScanError extends Error {}
 

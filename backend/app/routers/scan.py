@@ -25,7 +25,10 @@ _MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB — generous for a phone camera se
 
 _SAMPLE_ERROR_MESSAGES: dict[str, str] = {
     "no_face_detected": "We couldn't find a face in that photo. Try again with your face centered and well-lit.",
-    "face_out_of_frame": "Your face is too close to the edge of the frame. Center your face and try again.",
+    "face_out_of_frame": (
+        "Your face is too close to the edge of the frame — drag the boxes below to "
+        "reposition them, or retake with your face more centered."
+    ),
     "patch_clipped": (
         "That photo is too bright in places — drag the boxes below to fine-tune "
         "where we sample, or retake it in softer light."
@@ -64,7 +67,7 @@ class ScanImage(BaseModel):
 
 
 class LowConfidenceDetail(BaseModel):
-    reason: Literal["patch_clipped", "inconsistent_patches"]
+    reason: Literal["patch_clipped", "inconsistent_patches", "face_out_of_frame"]
     message: str
     patches: PatchAnchorsPayload
     image: ScanImage
@@ -119,7 +122,7 @@ def _patch_anchors_payload(anchors: AnchorPoints) -> PatchAnchorsPayload:
 
 
 def _low_confidence_detail(
-    reason: Literal["patch_clipped", "inconsistent_patches"],
+    reason: Literal["patch_clipped", "inconsistent_patches", "face_out_of_frame"],
     message: str,
     anchors: AnchorPoints,
     width: int,
@@ -153,13 +156,13 @@ async def scan(background_tasks: BackgroundTasks, photo: UploadFile = File(...))
 
     sample = sample_skin_regions(image_bgr)
     if not sample.success:
-        if sample.error == "patch_clipped":
-            assert sample.anchors is not None  # patch_clipped always carries anchors
-            log_event("scan_low_confidence", {"reason": "patch_clipped"})
+        if sample.error in ("patch_clipped", "face_out_of_frame"):
+            assert sample.anchors is not None  # both reasons always carry anchors
+            log_event("scan_low_confidence", {"reason": sample.error})
             raise HTTPException(
                 status_code=422,
                 detail=_low_confidence_detail(
-                    "patch_clipped", _SAMPLE_ERROR_MESSAGES["patch_clipped"], sample.anchors, width, height
+                    sample.error, _SAMPLE_ERROR_MESSAGES[sample.error], sample.anchors, width, height
                 ),
             )
         raise HTTPException(status_code=422, detail=_SAMPLE_ERROR_MESSAGES[sample.error])

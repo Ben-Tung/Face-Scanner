@@ -426,6 +426,45 @@ def test_webhook_skips_confirmation_email_when_customer_details_missing(monkeypa
     assert response.status_code == 200
 
 
+def test_webhook_falls_back_to_session_customer_email_when_customer_details_email_is_null(monkeypatch):
+    """customer_details.email can be null while Stripe still knows the
+    customer's email via the session's own top-level customer_email field
+    (populated when Stripe already knew it before checkout) — that should
+    still get a confirmation email rather than being silently dropped."""
+    monkeypatch.setattr(
+        payments_module, "get_settings", lambda: _configured_settings(resend_api_key="re_test_fake")
+    )
+
+    fake_event = _fake_event(
+        "checkout.session.completed",
+        _fake_session(
+            metadata=SimpleNamespace(scan_id=_SCAN_ID),
+            payment_intent="pi_webhook",
+            id="cs_test_evt",
+            customer_details=SimpleNamespace(email=None),
+            customer_email="shopper@example.com",
+        ),
+    )
+    monkeypatch.setattr(payments_module.stripe.Webhook, "construct_event", lambda *a, **k: fake_event)
+
+    monkeypatch.setattr(payments_module, "mark_scan_paid", lambda *a, **k: True)
+    monkeypatch.setattr(payments_module, "log_event", lambda *a, **k: None)
+
+    captured = {}
+    monkeypatch.setattr(
+        payments_module,
+        "send_confirmation_email",
+        lambda email, result_url: captured.update(email=email, result_url=result_url),
+    )
+
+    response = client.post(
+        "/api/stripe/webhook", content=b"{}", headers={"Stripe-Signature": "valid"}
+    )
+
+    assert response.status_code == 200
+    assert captured["email"] == "shopper@example.com"
+
+
 def test_webhook_skips_confirmation_email_when_customer_email_is_null(monkeypatch):
     """Stripe can populate customer_details while leaving .email null — a
     documented case distinct from customer_details being absent entirely,

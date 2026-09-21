@@ -236,6 +236,32 @@ def test_scan_reports_structured_detail_for_patch_clipped(monkeypatch):
     assert detail["image"] == {"width": 640, "height": 480}
 
 
+def test_scan_reports_structured_detail_for_face_out_of_frame(monkeypatch):
+    anchors = AnchorPoints(
+        forehead=np.array([-5.0, 80.0]),
+        left_cheek=np.array([60.0, 200.0]),
+        right_cheek=np.array([180.0, 200.0]),
+        patch_half_size=20.0,
+    )
+    monkeypatch.setattr(
+        scan_module,
+        "sample_skin_regions",
+        lambda image_bgr: SkinSampleResult(success=False, error="face_out_of_frame", anchors=anchors),
+    )
+
+    response = client.post(
+        "/api/scan",
+        files={"photo": ("blank.jpg", _blank_jpeg_bytes(), "image/jpeg")},
+    )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["reason"] == "face_out_of_frame"
+    assert detail["patches"]["forehead"] == {"x": -5.0, "y": 80.0}
+    assert detail["patches"]["patch_half_size"] == 20.0
+    assert detail["image"] == {"width": 640, "height": 480}
+
+
 def test_scan_returns_503_when_persistence_fails(monkeypatch):
     def _raise(*args, **kwargs):
         raise RuntimeError("DATABASE_URL is not configured; scan persistence requires a database.")
