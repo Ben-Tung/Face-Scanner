@@ -6,12 +6,13 @@ from uuid import uuid4
 
 import cv2
 import numpy as np
-from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Request, Response, UploadFile
 from pydantic import BaseModel
 
 from app.analytics import log_event
 from app.palettes import SWATCHES_BY_SEASON
 from app.paragraph import generate_paragraph
+from app.rate_limit import limiter, scan_limit_value
 from app.scans_repo import consume_retake, create_scan, get_scan
 from app.schemas import SwatchResponse, parse_scan_id_or_404, to_swatch_responses
 from app.vision.season_classifier import Season, classify_season
@@ -137,7 +138,13 @@ def _low_confidence_detail(
 
 
 @router.post("/scan", response_model=ScanResponse)
-async def scan(background_tasks: BackgroundTasks, photo: UploadFile = File(...)) -> ScanResponse:
+@limiter.limit(scan_limit_value)
+async def scan(
+    request: Request,
+    response: Response,
+    background_tasks: BackgroundTasks,
+    photo: UploadFile = File(...),
+) -> ScanResponse:
     """Detect a face in the uploaded photo and classify its color season.
 
     Never retains the uploaded photo beyond this request — nothing here
@@ -196,7 +203,10 @@ async def scan(background_tasks: BackgroundTasks, photo: UploadFile = File(...))
 
 
 @router.post("/scan/manual", response_model=ScanResponse)
+@limiter.limit(scan_limit_value)
 async def scan_manual(
+    request: Request,
+    response: Response,
     background_tasks: BackgroundTasks,
     photo: UploadFile = File(...),
     forehead_x: float = Form(...),

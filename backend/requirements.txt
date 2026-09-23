@@ -12,6 +12,15 @@ numpy~=2.5
 # Multipart form parsing — required by FastAPI's UploadFile/File()
 python-multipart~=0.0
 
+# Per-IP rate limiting for the unauthenticated scan endpoints (in-memory,
+# single-process — see app/rate_limit.py). Pinned to the 0.1.x line since
+# slowapi's own docs self-describe as alpha quality.
+slowapi~=0.1.10
+
+# Spoofing-resistant client IP extraction from X-Forwarded-For behind
+# Render's edge proxy — see app/client_ip.py
+python-ipware~=3.0
+
 # Best-effort analytics event logging (see CLAUDE.md's logging convention)
 psycopg[binary]~=3.2
 
