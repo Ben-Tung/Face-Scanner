@@ -30,12 +30,14 @@ class Settings(BaseSettings):
     scan_rate_limit_per_minute: int = 5
     scan_rate_limit_per_day: int = 60
 
-    # See app/client_ip.py. Default (False) trusts the RIGHTMOST entry of
-    # X-Forwarded-For -- matches standard reverse-proxy append behavior.
-    # Flip via env var only if an empirical check against the live
-    # deployment shows Render puts the real client IP somewhere else -- no
-    # code change needed.
-    client_ip_trust_leftmost: bool = False
+    # See app/client_ip.py. Number of trusted reverse-proxy hops between the
+    # real client and this app -- the client IP is read from
+    # X-Forwarded-For at position -client_ip_trust_hops. Default (3) is
+    # empirically confirmed for Render as of 2026-09-23: client -> Cloudflare
+    # edge -> a second Cloudflare-attributed hop -> Render's internal LB ->
+    # this app. Change via env var, no code change needed, if Render's proxy
+    # chain shape ever changes.
+    client_ip_trust_hops: int = 3
 
     # Read here so the value is validated at startup, but nothing connects to it
     # yet — the database is wired up when the first feature needs it.

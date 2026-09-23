@@ -34,13 +34,6 @@ _ANCHORS = AnchorPoints(
 )
 
 
-@pytest.fixture(autouse=True)
-def _reset_ipware_cache():
-    client_ip_module._ipware.cache_clear()
-    yield
-    client_ip_module._ipware.cache_clear()
-
-
 def _blank_jpeg_bytes() -> bytes:
     blank_image = np.full((480, 640, 3), 200, dtype=np.uint8)
     ok, encoded = cv2.imencode(".jpg", blank_image)
@@ -179,8 +172,12 @@ def test_rate_limit_key_is_per_ip_not_global(monkeypatch):
     monkeypatch.setattr(rate_limit_module, "get_settings", lambda: _tiny_limit_settings(per_minute=2))
     _stub_successful_pipeline(monkeypatch)
 
+    # Default client_ip_trust_hops is 3 (see app/client_ip.py) -- pad each
+    # header with 2 trailing entries, mirroring the real Cloudflare + Render
+    # LB chain, so the two simulated clients actually resolve to different
+    # IPs instead of both falling back to the same TestClient socket peer.
     for ip in ("203.0.113.10", "203.0.113.20"):
-        headers = {"X-Forwarded-For": ip}
+        headers = {"X-Forwarded-For": f"{ip}, 104.23.1.1, 10.0.0.5"}
         assert _post_scan(headers=headers).status_code == 200
         assert _post_scan(headers=headers).status_code == 200
 
@@ -193,10 +190,19 @@ def _make_request(xff: str | None, client_host: str = "10.0.0.5") -> Request:
     return Request(scope)
 
 
-def test_get_client_ip_trusts_rightmost_xff_entry_by_default():
-    request = _make_request("9.9.9.9, 8.8.8.8, 203.0.113.5")
+def test_get_client_ip_trusts_configured_hop_count_from_the_right():
+    # Default client_ip_trust_hops is 3 -- empirically confirmed against
+    # Render's actual chain: client -> Cloudflare edge -> a second
+    # Cloudflare-attributed hop -> Render's internal LB -> app.
+    request = _make_request("9.9.9.9, 8.8.8.8, 203.0.113.5, 104.23.1.1, 10.0.0.5")
 
     assert get_client_ip(request) == "203.0.113.5"
+
+
+def test_get_client_ip_falls_back_when_fewer_entries_than_trust_hops():
+    request = _make_request("203.0.113.5, 104.23.1.1", client_host="10.0.0.9")
+
+    assert get_client_ip(request) == "10.0.0.9"
 
 
 def test_get_client_ip_falls_back_to_request_client_host_when_no_xff():
@@ -205,10 +211,14 @@ def test_get_client_ip_falls_back_to_request_client_host_when_no_xff():
     assert get_client_ip(request) == "203.0.113.9"
 
 
-def test_get_client_ip_respects_trust_leftmost_setting(monkeypatch):
-    monkeypatch.setattr(client_ip_module, "get_settings", lambda: Settings(client_ip_trust_leftmost=True))
-    client_ip_module._ipware.cache_clear()
+def test_get_client_ip_respects_trust_hops_setting(monkeypatch):
+    # With the default trust_hops=3, this 3-entry list would resolve to
+    # "9.9.9.9" (position -3, the attacker-controlled leftmost entry).
+    # Overriding to trust_hops=1 must select "203.0.113.5" (position -1)
+    # instead -- proving the escape hatch actually changes the outcome, not
+    # just that it doesn't error.
+    monkeypatch.setattr(client_ip_module, "get_settings", lambda: Settings(client_ip_trust_hops=1))
 
     request = _make_request("9.9.9.9, 8.8.8.8, 203.0.113.5")
 
-    assert get_client_ip(request) == "9.9.9.9"
+    assert get_client_ip(request) == "203.0.113.5"
