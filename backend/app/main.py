@@ -27,7 +27,12 @@ def create_app() -> FastAPI:
     # already rewrites request.client.host directly.
     @app.middleware("http")
     async def _log_client_ip_diagnostic(request, call_next):
-        logger.info(
+        # .warning, not .info: nothing in this app calls logging.basicConfig,
+        # so the root logger's effective level defaults to WARNING and an
+        # INFO-level call here would be silently dropped before ever
+        # reaching a handler (see the other app.* loggers in this codebase,
+        # which all use .warning/.exception for the same reason).
+        logger.warning(
             "xff_diagnostic path=%s raw_xff=%r client_host=%r",
             request.url.path,
             request.headers.get("x-forwarded-for"),
