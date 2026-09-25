@@ -256,6 +256,43 @@ def test_get_scan_state_self_heals_on_matching_session(monkeypatch):
     assert marked == [(_SCAN_ID, "pi_new")]
 
 
+def test_get_scan_state_self_heal_sends_confirmation_email(monkeypatch):
+    """The post-redirect fallback path (_verify_and_mark_paid) must send the
+    confirmation email too, not just the webhook -- it shares
+    _finalize_paid_scan specifically so a customer isn't left without a
+    confirmation email when the webhook never lands."""
+    monkeypatch.setattr(payments_module, "get_scan", lambda scan_id: _unpaid_row())
+    monkeypatch.setattr(
+        payments_module, "get_settings", lambda: _configured_settings(resend_api_key="re_test_fake")
+    )
+    monkeypatch.setattr(payments_module, "log_event", lambda *a, **k: None)
+    monkeypatch.setattr(payments_module, "mark_scan_paid", lambda scan_id, pi: True)
+    monkeypatch.setattr(
+        payments_module.stripe.checkout.Session,
+        "retrieve",
+        lambda session_id, **kw: _fake_session(
+            payment_status="paid",
+            metadata=SimpleNamespace(scan_id=_SCAN_ID),
+            payment_intent="pi_new",
+            id="cs_test_456",
+            customer_details=SimpleNamespace(email="customer@example.com"),
+        ),
+    )
+
+    emailed = []
+    monkeypatch.setattr(
+        payments_module,
+        "send_confirmation_email",
+        lambda to_email, result_url: emailed.append((to_email, result_url)),
+    )
+
+    response = client.get(f"/api/scans/{_SCAN_ID}", params={"session_id": "cs_test_456"})
+
+    assert response.status_code == 200
+    assert response.json()["paid"] is True
+    assert emailed == [("customer@example.com", f"http://localhost:3000/result/{_SCAN_ID}")]
+
+
 def test_get_scan_state_ignores_session_for_a_different_scan(monkeypatch):
     """Security case: a session_id that paid for a *different* scan must
     not unlock this one."""
