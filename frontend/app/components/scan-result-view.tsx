@@ -14,6 +14,7 @@ import {
 } from "@/lib/api";
 import { ColorChip } from "./color-chip";
 import { FullReportView } from "./full-report-view";
+import { ReportShowcase } from "./report-showcase";
 import { RetakeCapture } from "./retake-capture";
 import { PRIMARY_BUTTON_CLASS, SPINNER_CLASS } from "./ui";
 
@@ -152,6 +153,7 @@ export function ScanResultView() {
               ? "Redirecting to checkout…"
               : `Unlock full report — $${(scan.priceCents / 100).toFixed(2)}`}
           </button>
+          <ReportShowcase />
         </>
       )}
 
