@@ -11,7 +11,7 @@ def test_health_returns_ok():
     assert response.status_code == 200
     assert response.json() == {
         "status": "ok",
-        "service": "palette-api",
+        "service": "hue-api",
         "version": "0.1.0",
         "environment": "development",
     }

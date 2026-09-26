@@ -2,15 +2,15 @@ services:
   db:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-palette}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-palette}
-      POSTGRES_DB: ${POSTGRES_DB:-palette}
+      POSTGRES_USER: ${POSTGRES_USER:-hue}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hue}
+      POSTGRES_DB: ${POSTGRES_DB:-hue}
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-palette} -d ${POSTGRES_DB:-palette}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hue} -d ${POSTGRES_DB:-hue}"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -25,7 +25,7 @@ services:
     environment:
       ENVIRONMENT: development
       CORS_ORIGINS: '["http://localhost:3000"]'
-      DATABASE_URL: postgresql://${POSTGRES_USER:-palette}:${POSTGRES_PASSWORD:-palette}@db:5432/${POSTGRES_DB:-palette}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-hue}:${POSTGRES_PASSWORD:-hue}@db:5432/${POSTGRES_DB:-hue}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}

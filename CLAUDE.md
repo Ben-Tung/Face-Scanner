@@ -1,4 +1,4 @@
-# Palette — Color Season Analyzer
+# Hue — Color Season Analyzer
 
 ## What this is
 A web app that scans a selfie, classifies the user's color season, and sells a full color/style report behind a one-time Stripe paywall. V1 = color season only, free scan + paid unlock. V2 adds face shape as a bundled "Full Beauty Profile."

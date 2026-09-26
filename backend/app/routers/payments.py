@@ -269,7 +269,7 @@ def create_checkout(scan_id: str) -> CheckoutResponse:
                     "price_data": {
                         "currency": "usd",
                         "unit_amount": _FULL_REPORT_PRICE_CENTS,
-                        "product_data": {"name": "Palette Full Report"},
+                        "product_data": {"name": "Hue Full Report"},
                     },
                     "quantity": 1,
                 }

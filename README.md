@@ -1,4 +1,4 @@
-# Palette — Color Season Analyzer
+# Hue — Color Season Analyzer
 
 Scan a selfie, get your color season. See [CLAUDE.md](./CLAUDE.md) for product scope and conventions.
 
@@ -23,7 +23,7 @@ docker compose up --build
 | API          | http://localhost:8000          |
 | API docs     | http://localhost:8000/docs     |
 | Health check | http://localhost:8000/api/health |
-| Postgres     | `localhost:5432` (`palette` / `palette`) |
+| Postgres     | `localhost:5432` (`hue` / `hue`) |
 
 Both services hot-reload from the mounted source. The home page shows the
 backend's health status, so a green "Connected" line means the whole chain is

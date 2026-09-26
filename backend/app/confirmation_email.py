@@ -19,11 +19,9 @@ from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-# Resend's own sandbox sender — works without a verified domain, but Resend
-# restricts delivery to the account's own signup email until a domain is
-# verified. Swap for a verified no-reply@<domain> sender once that's set up
-# (out of scope for this change).
-_FROM_ADDRESS = "Palette <onboarding@resend.dev>"
+# tryhue.site is a verified sending domain in Resend, so this isn't limited
+# to the sandbox sender's own-signup-email-only delivery restriction.
+_FROM_ADDRESS = "Hue <noreply@tryhue.site>"
 _SUBJECT = "Your color season results are ready"
 
 _TEXT_TEMPLATE = (

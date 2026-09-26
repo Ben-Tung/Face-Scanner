@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Palette",
+  title: "Hue",
   description: "Find the colors that suit you.",
 };
 
