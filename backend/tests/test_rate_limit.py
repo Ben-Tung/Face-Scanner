@@ -126,6 +126,25 @@ def test_scan_429_response_includes_retry_after_header(monkeypatch):
     assert int(response.headers["Retry-After"]) > 0
 
 
+def test_scan_429_response_has_a_friendly_detail_message(monkeypatch):
+    """Guards against regressing to slowapi's default {"error": ...} shape,
+    which the frontend's error parsing doesn't recognize (see
+    app/rate_limit.py's rate_limit_exceeded_handler) -- a rate-limited user
+    must get an actual explanation, not the generic "something went wrong"
+    fallback a bad photo would also produce."""
+    monkeypatch.setattr(rate_limit_module, "get_settings", lambda: _tiny_limit_settings())
+    _stub_successful_pipeline(monkeypatch)
+
+    _post_scan()
+    _post_scan()
+    response = _post_scan()
+
+    assert response.status_code == 429
+    body = response.json()
+    assert isinstance(body.get("detail"), str)
+    assert "limit" in body["detail"].lower()
+
+
 def test_scan_and_scan_manual_have_independent_rate_limit_counters(monkeypatch):
     """Design choice: /scan and /scan/manual are limited per-route (slowapi's
     default key_style="url"), not via one shared bucket — exhausting one
