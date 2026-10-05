@@ -49,6 +49,18 @@ _CLASSIFY_ERROR_MESSAGES: dict[str, str] = {
         "clear skin, or retake with your hair pulled back."
     ),
 }
+# The retake screen has no drag-the-boxes adjuster (see retake-capture.tsx),
+# so its low-confidence messages only ever point at trying another photo.
+_RETAKE_ERROR_MESSAGES: dict[str, str] = {
+    "face_out_of_frame": (
+        "Your face is too close to the edge of that photo. Try another with your face centered in the frame."
+    ),
+    "patch_clipped": "That photo is too bright in places. Try another in softer, indirect light.",
+    "inconsistent_patches": (
+        "We got mixed color readings from your forehead and cheeks — usually hair, a shadow, "
+        "or a bright reflection. Try another photo with your hair pulled back, in even light."
+    ),
+}
 
 
 class ScanResponse(BaseModel):
@@ -360,39 +372,22 @@ async def retake_scan(
 
     image_bgr = await _read_and_decode_photo(photo)
     log_event("retake_started", {"scan_id": scan_id})
-    height, width = image_bgr.shape[:2]
 
     sample = sample_skin_regions(image_bgr)
     if not sample.success:
-        if sample.error == "patch_clipped":
-            assert sample.anchors is not None  # patch_clipped always carries anchors
-            log_event("scan_low_confidence", {"reason": "patch_clipped", "retake": True})
-            raise HTTPException(
-                status_code=422,
-                detail=_low_confidence_detail(
-                    "patch_clipped", _SAMPLE_ERROR_MESSAGES["patch_clipped"], sample.anchors, width, height
-                ),
-            )
+        if sample.error in _RETAKE_ERROR_MESSAGES:
+            log_event("scan_low_confidence", {"reason": sample.error, "retake": True})
+            raise HTTPException(status_code=422, detail=_RETAKE_ERROR_MESSAGES[sample.error])
         raise HTTPException(status_code=422, detail=_SAMPLE_ERROR_MESSAGES[sample.error])
 
     sclera_rgb = _sclera_rgb(sample)
     result = classify_season(sample.forehead_rgb, sample.left_cheek_rgb, sample.right_cheek_rgb, sclera_rgb=sclera_rgb)
     if not result.success:
-        assert sample.anchors is not None  # sampling succeeded, so anchors are always set
         log_event(
             "scan_low_confidence",
             {"reason": "inconsistent_patches", "retake": True, **_hue_difference_metadata(result)},
         )
-        raise HTTPException(
-            status_code=422,
-            detail=_low_confidence_detail(
-                "inconsistent_patches",
-                _CLASSIFY_ERROR_MESSAGES["inconsistent_patches"],
-                sample.anchors,
-                width,
-                height,
-            ),
-        )
+        raise HTTPException(status_code=422, detail=_RETAKE_ERROR_MESSAGES["inconsistent_patches"])
 
     season = result.classification.season
     swatches = to_swatch_responses(SWATCHES_BY_SEASON[season])

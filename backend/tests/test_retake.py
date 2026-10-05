@@ -189,6 +189,52 @@ def test_retake_low_confidence_does_not_consume_the_retake(monkeypatch):
     assert response.status_code == 422
 
 
+def _stub_sampling_failure(monkeypatch, error: str) -> None:
+    monkeypatch.setattr(
+        scan_module,
+        "sample_skin_regions",
+        lambda image_bgr: SkinSampleResult(success=False, error=error, anchors=_ANCHORS),
+    )
+
+
+def _stub_inconsistent_patches(monkeypatch) -> None:
+    _stub_successful_pipeline(monkeypatch)
+    monkeypatch.setattr(
+        scan_module,
+        "classify_season",
+        lambda *args, **kwargs: SeasonClassificationResult(
+            success=False, error="inconsistent_patches", max_hue_difference=16.0
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "stub",
+    [
+        lambda mp: _stub_sampling_failure(mp, "patch_clipped"),
+        lambda mp: _stub_sampling_failure(mp, "face_out_of_frame"),
+        _stub_inconsistent_patches,
+    ],
+    ids=["patch_clipped", "face_out_of_frame", "inconsistent_patches"],
+)
+def test_retake_low_confidence_message_never_mentions_boxes(monkeypatch, stub):
+    """The retake screen has no drag-the-boxes adjuster (retake-capture.tsx
+    shows the error as plain text), so its messages must not tell a paying
+    customer to drag boxes that aren't there."""
+    monkeypatch.setattr(scan_module, "get_scan", lambda scan_id: _paid_row())
+    monkeypatch.setattr(
+        scan_module, "consume_retake", lambda *a, **k: pytest.fail("must not consume the retake")
+    )
+    stub(monkeypatch)
+
+    response = _post_retake()
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert isinstance(detail, str)
+    assert "box" not in detail.lower()
+
+
 def test_retake_503s_when_persisting_fails(monkeypatch):
     monkeypatch.setattr(scan_module, "get_scan", lambda scan_id: _paid_row())
     _stub_successful_pipeline(monkeypatch)
