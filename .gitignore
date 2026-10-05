@@ -18,6 +18,8 @@ out/
 .DS_Store
 .vscode/
 *.log
+*.swp
+*.swo
 
 # Supabase local dev
 .supabase/
