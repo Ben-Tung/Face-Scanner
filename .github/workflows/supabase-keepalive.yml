@@ -1,0 +1,57 @@
+# Keeps the free-tier Supabase projects from auto-pausing (7 days of low
+# activity). Does a real INSERT into public.keepalive via the REST API using
+# the publishable key; the table only grants anon INSERT (source) and prunes
+# itself to the newest 50 rows.
+name: Supabase keep-alive
+
+on:
+  schedule:
+    - cron: "23 14 * * 1,4" # Mon + Thu 14:23 UTC — max gap 4 days
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [PROD, DEV]
+    steps:
+      - name: Insert keep-alive row
+        env:
+          SUPABASE_URL: ${{ secrets[format('SUPABASE_{0}_URL', matrix.project)] }}
+          SUPABASE_KEY: ${{ secrets[format('SUPABASE_{0}_PUBLISHABLE_KEY', matrix.project)] }}
+        run: |
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_KEY" ]; then
+            echo "::error::Missing SUPABASE_${{ matrix.project }}_URL or SUPABASE_${{ matrix.project }}_PUBLISHABLE_KEY secret"
+            exit 1
+          fi
+          status=$(curl --silent --show-error --fail-with-body \
+            --retry 3 --retry-all-errors --max-time 30 \
+            --output response.txt --write-out '%{http_code}' \
+            -X POST "${SUPABASE_URL%/}/rest/v1/keepalive" \
+            -H "apikey: $SUPABASE_KEY" \
+            -H "Content-Type: application/json" \
+            -H "Prefer: return=minimal" \
+            --data '{"source":"github-actions"}') || {
+              echo "::error::Request failed (HTTP ${status:-none})"; cat response.txt 2>/dev/null; exit 1;
+            }
+          if [ "${status:0:1}" != "2" ]; then
+            echo "::error::Unexpected HTTP $status"; cat response.txt; exit 1
+          fi
+          echo "OK: HTTP $status"
+
+  # GitHub disables scheduled workflows in public repos after 60 days without
+  # repo activity; re-enabling on each run resets that clock.
+  stay-enabled:
+    needs: ping
+    if: always() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/supabase-keepalive.yml/enable"
