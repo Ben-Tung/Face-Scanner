@@ -48,11 +48,31 @@ _CHROMA_CLEAR_MUTED_THRESHOLD = 25.0
 # (chroma ~7-10), where hue angle is mostly noise - a 1-unit a*/b* wobble
 # swings it ~8 degrees. ΔH* scales the angle by chroma, so near-neutral
 # patches can't disagree by much. 10.0 equals the old 25-degree cutoff at
-# chroma ~23 (typical skin), so behavior there barely changes. Across 15
-# distinct real photos that classify successfully the max is 0.9-4.5; newdaylight is
-# 6.07; a real blown-highlight case that must still be rejected (see
+# chroma ~23 (typical skin), so behavior there barely changes. Across the
+# 16 color-managed fixture photos the max is 0.9-4.5, except newdaylight
+# (SampleEvenLightLowChroma) at 6.75; a real blown-highlight case that must
+# still be rejected (see
 # test_classify_season_flags_inconsistent_patches_as_low_confidence) is 16.0.
 _HUE_DIFFERENCE_THRESHOLD = 10.0
+
+# A forehead patch reading more than this many L* darker than even the
+# DARKER cheek is in shadow - a fringe or a hat brim - and is left out of
+# the average skin reading. One-sided against the darker cheek on purpose:
+# directional side light darkens one cheek and leaves the forehead in
+# between, so it never trips this; a forehead darker than both is the
+# signature of a shadow cast from above. Measured on color-managed
+# fixtures, forehead minus darker cheek reads -8.4 to +33.6 for every other
+# subject, and -0.8 / -4.0 for the fringe-wearing test subject's unshaded
+# photos versus -13.4 to -29.1 for their shaded ones; 11.0 sits in that gap,
+# but on one fringe-wearing subject - forehead_dropped is logged on scan
+# events so this can be tuned against real traffic.
+#
+# Only the AVERAGE drops the forehead. The cross-patch hue check still
+# compares all three patches: a forehead far darker than both cheeks can
+# also mean both cheeks are the bad patches (see
+# test_classify_season_flags_inconsistent_patches_as_low_confidence, where
+# two glare-washed cheeks agree with each other but not with the forehead).
+_SHADED_FOREHEAD_L_GAP = 11.0
 
 # Depth is normalized against the sclera (whites of the eyes) when a reading
 # is available (see skin_sampling.sample_sclera and normalize_depth_lightness
@@ -139,6 +159,9 @@ class SeasonClassification:
     undertone: Undertone
     depth: Depth
     clarity: Clarity
+    # Raw average of the patches actually used: all three, or just the
+    # cheeks when the forehead was dropped as shaded (see
+    # _SHADED_FOREHEAD_L_GAP).
     avg_lab: Lab
     # hue_deg/chroma actually used for the undertone/clarity decision: raw
     # avg_lab-derived when no sclera reading was available, sclera-normalized
@@ -167,6 +190,9 @@ class SeasonClassificationResult:
     # reading was available - success or failure - logged against
     # _MAX_COLOR_CAST_AB the same way.
     color_cast: float | None = None
+    # Whether the forehead patch was left out of the average as shaded (see
+    # _SHADED_FOREHEAD_L_GAP), success or failure, logged for tuning.
+    forehead_dropped: bool = False
 
 
 def _srgb_to_linear(channel: int) -> float:
@@ -345,7 +371,10 @@ def classify_season(
     read as one skin tone, so this returns a failure instead of silently
     averaging incompatible readings.
     Ordinary directional lighting is expected to make patches disagree on
-    brightness; it isn't a sign of a bad sample on its own.
+    brightness; it isn't a sign of a bad sample on its own. The exception is
+    a forehead far darker than both cheeks - shaded from above, by a fringe
+    or hat brim - which is left out of the average (but not out of the hue
+    check; see `_SHADED_FOREHEAD_L_GAP`).
 
     `sclera_rgb`, when provided, normalizes both the depth decision
     (`normalize_depth_lightness`) and the undertone/clarity decision
@@ -362,20 +391,23 @@ def classify_season(
     mixed patch readings, but nothing but a retake fixes the lighting.
     """
     labs = [rgb_to_lab(forehead_rgb), rgb_to_lab(left_cheek_rgb), rgb_to_lab(right_cheek_rgb)]
+    forehead_lab, *cheek_labs = labs
     max_hue_difference = max(hue_difference(a, b) for a, b in itertools.combinations(labs, 2))
     sclera_lab = rgb_to_lab(sclera_rgb) if sclera_rgb is not None else None
     color_cast = sclera_color_cast(sclera_lab) if sclera_lab is not None else None
+    forehead_dropped = forehead_lab[0] < min(lab[0] for lab in cheek_labs) - _SHADED_FOREHEAD_L_GAP
+    measurements = {
+        "max_hue_difference": max_hue_difference,
+        "color_cast": color_cast,
+        "forehead_dropped": forehead_dropped,
+    }
 
     if color_cast is not None and color_cast > _MAX_COLOR_CAST_AB:
-        return SeasonClassificationResult(
-            success=False, error="color_cast", max_hue_difference=max_hue_difference, color_cast=color_cast
-        )
+        return SeasonClassificationResult(success=False, error="color_cast", **measurements)
     if max_hue_difference > _HUE_DIFFERENCE_THRESHOLD:
-        return SeasonClassificationResult(
-            success=False, error="inconsistent_patches", max_hue_difference=max_hue_difference, color_cast=color_cast
-        )
+        return SeasonClassificationResult(success=False, error="inconsistent_patches", **measurements)
 
-    avg_lab = _average_lab(labs)
+    avg_lab = _average_lab(cheek_labs if forehead_dropped else labs)
 
     if sclera_lab is not None:
         corrected_a, corrected_b = normalize_undertone_ab(avg_lab[1], avg_lab[2], sclera_lab[1], sclera_lab[2])
@@ -405,6 +437,4 @@ def classify_season(
         chroma=chroma,
         depth_lightness=depth_lightness,
     )
-    return SeasonClassificationResult(
-        success=True, classification=classification, max_hue_difference=max_hue_difference, color_cast=color_cast
-    )
+    return SeasonClassificationResult(success=True, classification=classification, **measurements)

@@ -48,7 +48,7 @@ def main() -> None:
         f"{'photo':14s} {'raw_L':>6s} {'scl_L':>6s} {'scl_a':>6s} {'scl_b':>6s} {'cast':>6s} "
         f"{'depth_L':>8s} {'raw_dep':>8s} {'new_dep':>8s} "
         f"{'raw_hue':>8s} {'cor_hue':>8s} {'raw_und':>8s} {'cor_und':>8s} "
-        f"{'season':>7s} sclera_status"
+        f"{'season':>7s} {'fh_drop':>7s} sclera_status"
     )
     print(header)
     print("-" * len(header))
@@ -117,7 +117,7 @@ def main() -> None:
             f"{_format_optional(result.color_cast):>6s} "
             f"{classification.depth_lightness:8.2f} {raw_depth:>8s} {classification.depth:>8s} "
             f"{raw_hue:8.1f} {classification.hue_deg:8.1f} {raw_undertone:>8s} {classification.undertone:>8s} "
-            f"{classification.season:>7s} {sclera_status}"
+            f"{classification.season:>7s} {'yes' if result.forehead_dropped else '-':>7s} {sclera_status}"
         )
 
     print("-" * len(header))

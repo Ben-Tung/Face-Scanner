@@ -6,17 +6,20 @@ read chroma ~7-10. The old hue-angle spread check (max(hue) - min(hue) > 25
 degrees) rejected it twice over: no 0/360 wraparound (cheeks at 357.1 and
 8.5 degrees read as a 348.6 degree spread), and even wrapped it's 43.6
 degrees, because hue angle is mostly noise at that chroma. The ΔH* check
-that replaced it (see season_classifier.hue_difference) reads it at ~6.07,
-under _HUE_DIFFERENCE_THRESHOLD. test_season_classifier.py pins the same
-case with this photo's sampled RGBs; this file checks the full
-detect -> sample -> classify pipeline end to end, so a change to anchor
-placement or patch sampling that reintroduces the failure gets caught too.
+that replaced it (see season_classifier.hue_difference) reads it at ~6.75
+color-managed (~6.07 before), under _HUE_DIFFERENCE_THRESHOLD.
+test_season_classifier.py pins the same case with this photo's sampled
+RGBs; this file checks the full detect -> sample -> classify pipeline end
+to end, so a change to anchor placement, patch sampling or decoding that
+reintroduces the failure gets caught too.
 
 Its forehead patch also sits in the shadow of the subject's fringe
-(forehead L* ~29 below the cheeks). That's left in on purpose - excluding a
-shaded forehead was deferred because it shifts undertone readings that
-test_undertone_normalization_real_photos.py depends on - so this only
-asserts the scan classifies, not which season it lands on.
+(forehead L* ~29 below the cheeks), so it's left out of the average (see
+season_classifier._SHADED_FOREHEAD_L_GAP) - but it still counts toward the
+hue check, and that shaded forehead is most of this photo's ΔH* (the cheeks
+alone read ~2.0). Which season it lands on is covered by
+test_same_subject_consistency_real_photos.py; this only asserts it
+classifies.
 
 Lives in its own fixtures/photos/consistency/ subdirectory so the
 non-recursive photo globs in the other real-photo suites (and the

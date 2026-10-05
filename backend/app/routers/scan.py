@@ -163,9 +163,9 @@ def _sclera_rgb(sample: SkinSampleResult) -> RGB | None:
 
 def _classification_metadata(result: SeasonClassificationResult) -> dict:
     """Event metadata carrying the measurements this scan was judged on -
-    cross-patch ΔH* and the lighting's color cast - so real-world values
-    can be compared against the classifier's inconsistent_patches and
-    color_cast thresholds over time."""
+    cross-patch ΔH*, the lighting's color cast, and whether a shaded
+    forehead was dropped - so real-world values can be compared against
+    the classifier's thresholds over time."""
 
     def _rounded(value: float | None) -> float | None:
         return round(value, 2) if value is not None else None
@@ -173,6 +173,7 @@ def _classification_metadata(result: SeasonClassificationResult) -> dict:
     return {
         "max_hue_difference": _rounded(result.max_hue_difference),
         "color_cast": _rounded(result.color_cast),
+        "forehead_dropped": result.forehead_dropped,
     }
 
 

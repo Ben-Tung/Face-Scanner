@@ -119,9 +119,16 @@ def test_classify_season_averages_across_differing_patches():
 
 def test_classify_season_flags_inconsistent_patches_as_low_confidence():
     # Real bug case: a blown highlight on the right cheek pegged its R
-    # channel at 255, pulling that patch toward white and its hue wildly
-    # off the other two - a max pairwise ΔH* of ~16.0 (the cheeks sit 68
-    # degrees of hue apart at real chroma), not just a brighter patch.
+    # channel at 255. Both cheeks read a yellow-green, non-skin hue (~95
+    # degrees) while the forehead reads a plausible skin hue (~32) - a max
+    # pairwise ΔH* of ~16.0 between forehead and left cheek, 68 degrees of
+    # hue apart at real chroma, not just a brighter patch.
+    #
+    # The forehead here is also ~30 L* darker than both cheeks, the same
+    # pattern as a fringe shadow, so it's dropped from the AVERAGE - which
+    # is exactly why the hue check must keep comparing all three patches:
+    # the two bad cheeks agree with each other (ΔH* ~1.7), and checking them
+    # alone would wave this photo through.
     result = classify_season(
         forehead_rgb=(123, 102, 99),
         left_cheek_rgb=(193, 185, 144),
@@ -131,6 +138,40 @@ def test_classify_season_flags_inconsistent_patches_as_low_confidence():
     assert result.success is False
     assert result.error == "inconsistent_patches"
     assert result.classification is None
+    assert result.forehead_dropped is True
+
+
+def test_classify_season_averages_without_a_shaded_forehead():
+    # A forehead reading far darker than BOTH cheeks (here ~21 L* below the
+    # darker one) is in shadow - a fringe or hat brim - so it's left out of
+    # the average rather than dragging the skin reading toward shadow.
+    forehead, left, right = (150, 112, 100), (216, 165, 152), (222, 170, 158)
+
+    result = classify_season(forehead, left, right)
+
+    assert result.success is True
+    assert result.forehead_dropped is True
+    left_lab, right_lab = rgb_to_lab(left), rgb_to_lab(right)
+    cheeks_only_avg = tuple((a + b) / 2 for a, b in zip(left_lab, right_lab))
+    assert result.classification.avg_lab == pytest.approx(cheeks_only_avg)
+
+
+def test_classify_season_keeps_a_forehead_darker_than_only_one_cheek():
+    # Side lighting darkens one cheek, leaving the forehead in between -
+    # ordinary directional light, not a shadow over the forehead.
+    result = classify_season((190, 145, 132), (230, 178, 165), (140, 104, 92))
+
+    assert result.success is True
+    assert result.forehead_dropped is False
+
+
+def test_classify_season_keeps_a_forehead_slightly_darker_than_both_cheeks():
+    # ~7 L* below the darker cheek: within the normal range for unshaded
+    # foreheads (real photos read down to ~8 below).
+    result = classify_season((196, 148, 135), (216, 165, 152), (222, 170, 158))
+
+    assert result.success is True
+    assert result.forehead_dropped is False
 
 
 def test_classify_season_tolerates_natural_patch_variation():
