@@ -68,7 +68,10 @@ def main() -> None:
 
         raw_result = classify_season(sample.forehead_rgb, sample.left_cheek_rgb, sample.right_cheek_rgb)
         if not raw_result.success:
-            print(f"{photo_path.name:14s} classification failed: {raw_result.error}")
+            print(
+                f"{photo_path.name:14s} classification failed: {raw_result.error} "
+                f"(max ΔH* {raw_result.max_hue_difference:.2f})"
+            )
             continue
         raw_l = raw_result.classification.avg_lab[0]
         raw_depth = raw_result.classification.depth
@@ -99,7 +102,10 @@ def main() -> None:
             sample.forehead_rgb, sample.left_cheek_rgb, sample.right_cheek_rgb, sclera_rgb=sclera_rgb
         )
         if not result.success:
-            print(f"{photo_path.name:14s} classification (corrected) failed: {result.error}")
+            print(
+                f"{photo_path.name:14s} classification (corrected) failed: {result.error} "
+                f"(max ΔH* {result.max_hue_difference:.2f})"
+            )
             continue
 
         classification = result.classification

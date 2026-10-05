@@ -3,11 +3,13 @@ import math
 import pytest
 
 from app.vision.season_classifier import (
+    _HUE_DIFFERENCE_THRESHOLD,
     _SCLERA_CORRECTION_CLAMP_AB,
     _SCLERA_REFERENCE_A,
     _SCLERA_REFERENCE_B,
     classify_season,
     hue_and_chroma,
+    hue_difference,
     normalize_depth_lightness,
     normalize_undertone_ab,
     rgb_to_lab,
@@ -117,8 +119,8 @@ def test_classify_season_averages_across_differing_patches():
 def test_classify_season_flags_inconsistent_patches_as_low_confidence():
     # Real bug case: a blown highlight on the right cheek pegged its R
     # channel at 255, pulling that patch toward white and its hue wildly
-    # off the other two (near-zero chroma makes hue unstable - see
-    # hue_and_chroma) - a 68 degree hue spread, not just a brighter patch.
+    # off the other two - a max pairwise ΔH* of ~16.0 (the cheeks sit 68
+    # degrees of hue apart at real chroma), not just a brighter patch.
     result = classify_season(
         forehead_rgb=(123, 102, 99),
         left_cheek_rgb=(193, 185, 144),
@@ -132,7 +134,7 @@ def test_classify_season_flags_inconsistent_patches_as_low_confidence():
 
 def test_classify_season_tolerates_natural_patch_variation():
     # Mild, realistic lighting variation across forehead/cheeks (~4.6 L*
-    # spread, ~1.9 degree hue spread) should still classify - the
+    # spread, max pairwise ΔH* ~0.7) should still classify - the
     # consistency check shouldn't be so strict it rejects normal photos.
     result = classify_season(
         forehead_rgb=(216, 165, 152),
@@ -142,6 +144,72 @@ def test_classify_season_tolerates_natural_patch_variation():
 
     assert result.success is True
     assert result.classification is not None
+
+
+def test_classify_season_tolerates_low_chroma_hue_wraparound():
+    # Real photo (newdaylight): evenly lit, pale/desaturated skin (chroma
+    # ~7-10). Patch hues read 40.7 / 357.1 / 8.5 degrees - the old
+    # max(hue) - min(hue) check called that a 348.6 degree spread (no
+    # 0/360 wraparound), and even wrapped it's 43.6 degrees, because hue
+    # angle is mostly noise at this chroma. Max pairwise ΔH* is only ~6.07.
+    result = classify_season(
+        forehead_rgb=(146, 124, 118),
+        left_cheek_rgb=(220, 203, 208),
+        right_cheek_rgb=(225, 204, 207),
+    )
+
+    assert result.success is True
+    assert result.max_hue_difference == pytest.approx(6.07, abs=0.01)
+
+
+def test_classify_season_flags_hue_disagreement_at_typical_chroma():
+    # Guards against the ΔH* check simply being looser than the angle check
+    # it replaced: at ordinary skin chroma (~27), a ~47 degree hue gap
+    # between the forehead and one cheek (max pairwise ΔH* ~21.5) must still
+    # be rejected.
+    result = classify_season(
+        forehead_rgb=(200, 150, 120),
+        left_cheek_rgb=(205, 140, 150),
+        right_cheek_rgb=(200, 150, 120),
+    )
+
+    assert result.success is False
+    assert result.error == "inconsistent_patches"
+    assert result.max_hue_difference > _HUE_DIFFERENCE_THRESHOLD
+
+
+def test_hue_difference_is_zero_for_identical_colors():
+    assert hue_difference((60.0, 15.0, 20.0), (60.0, 15.0, 20.0)) == pytest.approx(0.0)
+
+
+def test_hue_difference_is_symmetric():
+    first, second = (60.0, 15.0, 20.0), (70.0, 22.0, 8.0)
+    assert hue_difference(first, second) == pytest.approx(hue_difference(second, first))
+
+
+def test_hue_difference_wraps_around_zero_degrees():
+    def at_hue(hue_deg: float, chroma: float) -> tuple[float, float, float]:
+        return (60.0, chroma * math.cos(math.radians(hue_deg)), chroma * math.sin(math.radians(hue_deg)))
+
+    across_zero = hue_difference(at_hue(359.0, 20.0), at_hue(1.0, 20.0))
+    same_gap_elsewhere = hue_difference(at_hue(44.0, 20.0), at_hue(46.0, 20.0))
+
+    # 359 vs 1 degree is a 2 degree gap the short way round, not 358.
+    assert across_zero == pytest.approx(same_gap_elsewhere)
+    assert across_zero < 1.0
+
+
+def test_hue_difference_scales_with_chroma():
+    def at_hue(hue_deg: float, chroma: float) -> tuple[float, float, float]:
+        return (60.0, chroma * math.cos(math.radians(hue_deg)), chroma * math.sin(math.radians(hue_deg)))
+
+    # Same 30 degree hue gap: near-neutral colors barely differ, saturated
+    # ones differ a lot - the whole reason this replaced a raw angle check.
+    low_chroma = hue_difference(at_hue(30.0, 5.0), at_hue(60.0, 5.0))
+    high_chroma = hue_difference(at_hue(30.0, 30.0), at_hue(60.0, 30.0))
+
+    assert high_chroma == pytest.approx(low_chroma * 6)
+    assert low_chroma < _HUE_DIFFERENCE_THRESHOLD < high_chroma
 
 
 def test_normalize_depth_lightness_is_noop_at_reference_sclera():
@@ -370,8 +438,8 @@ def test_classify_season_tolerates_strong_directional_lighting():
     # Real photo: a single light in front of the face, angled slightly
     # upward, on shiny/glare-prone skin - forehead reads much brighter than
     # either cheek (L* spread ~33.6, well past the old brightness-based
-    # threshold this replaced), but all three patches agree on hue (~5.1
-    # degree spread), so this should still classify rather than being
+    # threshold this replaced), but all three patches agree on hue (max
+    # pairwise ΔH* ~2.0), so this should still classify rather than being
     # rejected for a lighting pattern that's extremely common in selfies.
     result = classify_season(
         forehead_rgb=(192, 156, 138),

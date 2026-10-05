@@ -15,7 +15,7 @@ from app.paragraph import generate_paragraph
 from app.rate_limit import limiter, scan_limit_value
 from app.scans_repo import consume_retake, create_scan, get_scan
 from app.schemas import SwatchResponse, parse_scan_id_or_404, to_swatch_responses
-from app.vision.season_classifier import Season, classify_season
+from app.vision.season_classifier import Season, SeasonClassificationResult, classify_season
 from app.vision.skin_sampling import AnchorPoints, sample_at_anchors, sample_skin_regions
 
 logger = logging.getLogger(__name__)
@@ -37,8 +37,9 @@ _SAMPLE_ERROR_MESSAGES: dict[str, str] = {
 }
 _CLASSIFY_ERROR_MESSAGES: dict[str, str] = {
     "inconsistent_patches": (
-        "Lighting looks uneven across your face — drag the boxes below to adjust, "
-        "or retake the photo in even light."
+        "We got mixed color readings from your forehead and cheeks — usually hair, "
+        "a shadow, or a bright reflection over one of the boxes. Drag the boxes onto "
+        "clear skin, or retake with your hair pulled back."
     ),
 }
 
@@ -113,6 +114,14 @@ def _persist_scan(season: Season, swatches: list[SwatchResponse], paragraph: str
     return scan_id
 
 
+def _hue_difference_metadata(result: SeasonClassificationResult) -> dict:
+    """Event metadata carrying the cross-patch ΔH* this scan was judged on,
+    so real-world values can be compared against the classifier's
+    inconsistent_patches threshold over time."""
+    value = result.max_hue_difference
+    return {"max_hue_difference": round(value, 2) if value is not None else None}
+
+
 def _patch_anchors_payload(anchors: AnchorPoints) -> PatchAnchorsPayload:
     return PatchAnchorsPayload(
         forehead=PatchPoint(x=float(anchors.forehead[0]), y=float(anchors.forehead[1])),
@@ -178,7 +187,7 @@ async def scan(
     result = classify_season(sample.forehead_rgb, sample.left_cheek_rgb, sample.right_cheek_rgb, sclera_rgb=sclera_rgb)
     if not result.success:
         assert sample.anchors is not None  # sampling succeeded, so anchors are always set
-        log_event("scan_low_confidence", {"reason": "inconsistent_patches"})
+        log_event("scan_low_confidence", {"reason": "inconsistent_patches", **_hue_difference_metadata(result)})
         raise HTTPException(
             status_code=422,
             detail=_low_confidence_detail(
@@ -201,7 +210,12 @@ async def scan(
         # correction now, not just depth - both share the same
         # sclera_rgb-availability gate. Split into two fields only if their
         # reliability gates ever diverge.
-        {"season": season, "scan_id": scan_id, "depth_normalized": sclera_rgb is not None},
+        {
+            "season": season,
+            "scan_id": scan_id,
+            "depth_normalized": sclera_rgb is not None,
+            **_hue_difference_metadata(result),
+        },
     )
     return ScanResponse(scan_id=scan_id, season=season, swatches=swatches, paragraph=paragraph)
 
@@ -267,7 +281,10 @@ async def scan_manual(
 
     result = classify_season(sample.forehead_rgb, sample.left_cheek_rgb, sample.right_cheek_rgb)
     if not result.success:
-        log_event("scan_low_confidence", {"reason": "inconsistent_patches", "manual": True})
+        log_event(
+            "scan_low_confidence",
+            {"reason": "inconsistent_patches", "manual": True, **_hue_difference_metadata(result)},
+        )
         raise HTTPException(
             status_code=422,
             detail=_low_confidence_detail(
@@ -280,7 +297,9 @@ async def scan_manual(
     paragraph = generate_paragraph(result.classification, SWATCHES_BY_SEASON[season])
     scan_id = _persist_scan(season, swatches, paragraph)
     background_tasks.add_task(
-        log_event, "scan_manual_completed", {"season": season, "scan_id": scan_id}
+        log_event,
+        "scan_manual_completed",
+        {"season": season, "scan_id": scan_id, **_hue_difference_metadata(result)},
     )
     return ScanResponse(scan_id=scan_id, season=season, swatches=swatches, paragraph=paragraph)
 
@@ -332,7 +351,10 @@ async def retake_scan(
     result = classify_season(sample.forehead_rgb, sample.left_cheek_rgb, sample.right_cheek_rgb, sclera_rgb=sclera_rgb)
     if not result.success:
         assert sample.anchors is not None  # sampling succeeded, so anchors are always set
-        log_event("scan_low_confidence", {"reason": "inconsistent_patches", "retake": True})
+        log_event(
+            "scan_low_confidence",
+            {"reason": "inconsistent_patches", "retake": True, **_hue_difference_metadata(result)},
+        )
         raise HTTPException(
             status_code=422,
             detail=_low_confidence_detail(
@@ -358,5 +380,9 @@ async def retake_scan(
     if not consumed:
         raise HTTPException(status_code=409, detail="You've already used your free retake for this scan.")
 
-    background_tasks.add_task(log_event, "retake_completed", {"season": season, "scan_id": scan_id})
+    background_tasks.add_task(
+        log_event,
+        "retake_completed",
+        {"season": season, "scan_id": scan_id, **_hue_difference_metadata(result)},
+    )
     return ScanResponse(scan_id=scan_id, season=season, swatches=swatches, paragraph=paragraph)

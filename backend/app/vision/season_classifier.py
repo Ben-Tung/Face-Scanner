@@ -15,6 +15,7 @@ against real user feedback without touching the classification logic.
 
 from __future__ import annotations
 
+import itertools
 import math
 from dataclasses import dataclass
 from typing import Literal
@@ -36,13 +37,22 @@ _CHROMA_CLEAR_MUTED_THRESHOLD = 25.0
 # L* by 25-35 between a well-lit forehead and a shadowed cheek without
 # changing the actual skin color much - brightness is expected to vary with
 # lighting. Hue is what determines undertone and stays far more stable under
-# that same lighting: across a real batch of 10 photos (including one with
-# a strong single-direction light and shiny/glare-prone skin), hue spread
-# topped out at 11.9 degrees even where L* spread hit 33.6. 25 sits well
-# clear of that, so patches disagreeing by more than this aren't reading the
-# same underlying skin color (e.g. hair, a colored light cast, or a patch
-# whose chroma is too low for hue to mean anything - see hue_and_chroma).
-_HUE_SPREAD_THRESHOLD_DEG = 25.0
+# that same lighting.
+#
+# Measured as the largest pairwise CIE ΔH* (see hue_difference), in Lab
+# units - NOT the raw hue-angle spread this replaced (max(hue) - min(hue) >
+# 25 degrees). That angle-only check misfired on a real, evenly-lit photo
+# (newdaylight) twice over: it had no 0/360 wraparound (cheeks at 357.1 and
+# 8.5 degrees, ~11 apart, read as a 348.6 degree spread), and even wrapped
+# correctly it read 43.6 degrees because the skin there was pale/desaturated
+# (chroma ~7-10), where hue angle is mostly noise - a 1-unit a*/b* wobble
+# swings it ~8 degrees. ΔH* scales the angle by chroma, so near-neutral
+# patches can't disagree by much. 10.0 equals the old 25-degree cutoff at
+# chroma ~23 (typical skin), so behavior there barely changes. Across 15
+# distinct real photos that classify successfully the max is 0.9-4.5; newdaylight is
+# 6.07; a real blown-highlight case that must still be rejected (see
+# test_classify_season_flags_inconsistent_patches_as_low_confidence) is 16.0.
+_HUE_DIFFERENCE_THRESHOLD = 10.0
 
 # Depth is normalized against the sclera (whites of the eyes) when a reading
 # is available (see skin_sampling.sample_sclera and normalize_depth_lightness
@@ -70,7 +80,7 @@ _SCLERA_CORRECTION_CLAMP_L = 20.0
 # normalized against its L* above: a uniform color-temperature cast (warm
 # incandescent vs. cool LED vs. daylight) shifts skin and sclera hue together,
 # and neither the clipping checks (nothing is blown out) nor
-# _HUE_SPREAD_THRESHOLD_DEG (every patch shifts together, so they still agree
+# _HUE_DIFFERENCE_THRESHOLD (every patch shifts together, so they still agree
 # with each other) catch it - see normalize_undertone_ab.
 #
 # _SCLERA_REFERENCE_A/_SCLERA_REFERENCE_B are NOT the mean over the original
@@ -145,6 +155,11 @@ class SeasonClassificationResult:
     success: bool
     classification: SeasonClassification | None = None
     error: ClassificationFailureReason | None = None
+    # Largest pairwise ΔH* across the three raw patches (see
+    # hue_difference), populated on success AND on an inconsistent_patches
+    # failure, so real scans can be logged against
+    # _HUE_DIFFERENCE_THRESHOLD to keep tuning it.
+    max_hue_difference: float | None = None
 
 
 def _srgb_to_linear(channel: int) -> float:
@@ -195,11 +210,29 @@ def _average_lab(labs: list[Lab]) -> Lab:
 def hue_and_chroma(lab: Lab) -> tuple[float, float]:
     _, a, b = lab
     # Near-zero chroma makes hue numerically unstable (atan2(0,0)=0, i.e.
-    # defaults to "cool") — a non-issue in practice since real skin never
-    # averages to ~0 chroma.
+    # defaults to "cool"). Real skin does get close: pale, desaturated
+    # patches in daylight have read chroma ~7, where a 1-unit a*/b* wobble
+    # swings hue ~8 degrees - so compare patches with hue_difference, never
+    # by raw hue angle.
     hue_deg = math.degrees(math.atan2(b, a)) % 360
     chroma = math.hypot(a, b)
     return hue_deg, chroma
+
+
+def hue_difference(lab1: Lab, lab2: Lab) -> float:
+    """CIE ΔH*: the hue component of the color difference between two Lab
+    colors, in Lab units (the same scale as ΔE*ab).
+
+    2 * sqrt(C1 * C2) * |sin(Δh / 2)| - a hue-angle gap weighted by both
+    colors' chroma, so two near-neutral colors can't disagree by much even
+    when their raw hue angles look far apart (hue is meaningless at ~0
+    chroma), and a gap straddling 0/360 is measured the short way round.
+    Symmetric, and 0 for identical hues.
+    """
+    hue1, chroma1 = hue_and_chroma(lab1)
+    hue2, chroma2 = hue_and_chroma(lab2)
+    delta_hue_deg = (hue2 - hue1 + 180) % 360 - 180
+    return 2 * math.sqrt(chroma1 * chroma2) * abs(math.sin(math.radians(delta_hue_deg) / 2))
 
 
 def normalize_depth_lightness(skin_l: float, sclera_l: float) -> float:
@@ -311,9 +344,10 @@ def classify_season(
     are responsible for checking `SkinSampleResult.success` first.
 
     Before averaging, checks the three patches' hue against each other —
-    patches that disagree in color (not just brightness) by more than
-    `_HUE_SPREAD_THRESHOLD_DEG` aren't read as one skin tone, so this
-    returns a failure instead of silently averaging incompatible readings.
+    patches where any pair disagrees in color (not just brightness) by more
+    than `_HUE_DIFFERENCE_THRESHOLD` (as ΔH*, see `hue_difference`) aren't
+    read as one skin tone, so this returns a failure instead of silently
+    averaging incompatible readings.
     Ordinary directional lighting is expected to make patches disagree on
     brightness; it isn't a sign of a bad sample on its own.
 
@@ -321,16 +355,18 @@ def classify_season(
     (`normalize_depth_lightness`) and the undertone/clarity decision
     (`normalize_undertone_ab`) against this photo's own lighting — see those
     functions. Both fall back to the raw averaged Lab when no sclera reading
-    is available. The cross-patch hue-spread check above runs on each raw
-    patch's own hue and returns before any of this, so it's unaffected either
+    is available. The cross-patch hue check above runs on each raw patch's
+    own Lab and returns before any of this, so it's unaffected either
     way: a uniform color cast shifts all three patches together and doesn't
     change their agreement with each other, which is exactly why that check
     can't catch it and a separate sclera-based correction is needed.
     """
     labs = [rgb_to_lab(forehead_rgb), rgb_to_lab(left_cheek_rgb), rgb_to_lab(right_cheek_rgb)]
-    hue_values = [hue_and_chroma(lab)[0] for lab in labs]
-    if max(hue_values) - min(hue_values) > _HUE_SPREAD_THRESHOLD_DEG:
-        return SeasonClassificationResult(success=False, error="inconsistent_patches")
+    max_hue_difference = max(hue_difference(a, b) for a, b in itertools.combinations(labs, 2))
+    if max_hue_difference > _HUE_DIFFERENCE_THRESHOLD:
+        return SeasonClassificationResult(
+            success=False, error="inconsistent_patches", max_hue_difference=max_hue_difference
+        )
 
     avg_lab = _average_lab(labs)
 
@@ -363,4 +399,6 @@ def classify_season(
         chroma=chroma,
         depth_lightness=depth_lightness,
     )
-    return SeasonClassificationResult(success=True, classification=classification)
+    return SeasonClassificationResult(
+        success=True, classification=classification, max_hue_difference=max_hue_difference
+    )

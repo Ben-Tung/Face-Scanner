@@ -17,7 +17,7 @@ import cv2
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from app.vision.season_classifier import classify_season, hue_and_chroma, rgb_to_lab
+from app.vision.season_classifier import _HUE_DIFFERENCE_THRESHOLD, classify_season, hue_and_chroma, rgb_to_lab
 from app.vision.skin_sampling import sample_skin_regions
 
 
@@ -61,6 +61,8 @@ def main() -> None:
         _print_patch("sclera", sclera_rgb)
 
     result = classify_season(sample.forehead_rgb, sample.left_cheek_rgb, sample.right_cheek_rgb, sclera_rgb=sclera_rgb)
+    print()
+    print(f"max ΔH*        = {result.max_hue_difference:.2f}  (inconsistent_patches above {_HUE_DIFFERENCE_THRESHOLD})")
     if not result.success:
         print()
         print(f"Classification failed: {result.error}")

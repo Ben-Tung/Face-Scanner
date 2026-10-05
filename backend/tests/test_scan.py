@@ -152,7 +152,7 @@ def test_scan_manual_reports_patch_clipped():
 
 def test_scan_manual_reports_inconsistent_patches():
     # Same three RGBs as test_season_classifier's inconsistent-patches case
-    # (68 degree hue spread), laid out as three stripes in one image.
+    # (max pairwise ΔH* ~16.0), laid out as three stripes in one image.
     photo_bytes = _striped_jpeg_bytes(
         forehead_rgb=(123, 102, 99),
         left_cheek_rgb=(193, 185, 144),
