@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from typing import Literal
 from uuid import uuid4
 
@@ -23,6 +24,12 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["scan"])
 
 _MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB — generous for a phone camera selfie
+# Upper bound on a manually submitted patch_half_size, as a fraction of the
+# image's shorter side. The frontend only ever echoes back the automatic
+# value (9% of interocular distance - a few percent of the short side), so
+# this leaves wide headroom while stopping one patch from swallowing the
+# whole photo, background included.
+_MAX_PATCH_HALF_SIZE_RATIO = 0.25
 
 _SAMPLE_ERROR_MESSAGES: dict[str, str] = {
     "no_face_detected": "We couldn't find a face in that photo. Try again with your face centered and well-lit.",
@@ -258,8 +265,14 @@ async def scan_manual(
         "left_cheek": (left_cheek_x, left_cheek_y),
         "right_cheek": (right_cheek_x, right_cheek_y),
     }
-    if patch_half_size <= 0 or any(
-        not (0 <= x <= width and 0 <= y <= height) for x, y in coords.values()
+    form_values = (forehead_x, forehead_y, left_cheek_x, left_cheek_y, right_cheek_x, right_cheek_y, patch_half_size)
+    # isfinite first: NaN compares False against everything, so it would
+    # slip through the range checks below and crash patch sampling.
+    if (
+        not all(math.isfinite(v) for v in form_values)
+        or patch_half_size <= 0
+        or patch_half_size > min(width, height) * _MAX_PATCH_HALF_SIZE_RATIO
+        or any(not (0 <= x <= width and 0 <= y <= height) for x, y in coords.values())
     ):
         raise HTTPException(status_code=400, detail="Those patch positions are out of bounds for this image.")
 

@@ -240,6 +240,50 @@ def test_scan_manual_rejects_non_positive_patch_half_size():
     assert response.status_code == 400
 
 
+@pytest.mark.parametrize("patch_half_size", ["nan", "inf", "-inf"])
+def test_scan_manual_rejects_non_finite_patch_half_size(patch_half_size: str):
+    # NaN slips past a plain `<= 0` check (every comparison with NaN is
+    # False), and both NaN and inf used to crash patch sampling with a 500.
+    photo_bytes = _solid_jpeg_bytes((216, 165, 152), size=60)
+    data = {**_manual_form_fields((30, 15), (15, 40), (45, 40), 8), "patch_half_size": patch_half_size}
+
+    response = client.post(
+        "/api/scan/manual",
+        files={"photo": ("patch.jpg", photo_bytes, "image/jpeg")},
+        data=data,
+    )
+
+    assert response.status_code == 400
+
+
+def test_scan_manual_rejects_non_finite_coordinate():
+    photo_bytes = _solid_jpeg_bytes((216, 165, 152), size=60)
+    data = {**_manual_form_fields((30, 15), (15, 40), (45, 40), 8), "forehead_x": "nan"}
+
+    response = client.post(
+        "/api/scan/manual",
+        files={"photo": ("patch.jpg", photo_bytes, "image/jpeg")},
+        data=data,
+    )
+
+    assert response.status_code == 400
+
+
+def test_scan_manual_rejects_oversized_patch_half_size():
+    # A huge patch would median the whole photo, background included, into
+    # a "skin" reading.
+    photo_bytes = _solid_jpeg_bytes((216, 165, 152), size=60)
+    data = _manual_form_fields((30, 15), (15, 40), (45, 40), 1e7)
+
+    response = client.post(
+        "/api/scan/manual",
+        files={"photo": ("patch.jpg", photo_bytes, "image/jpeg")},
+        data=data,
+    )
+
+    assert response.status_code == 400
+
+
 def test_scan_manual_rejects_non_image_upload():
     data = _manual_form_fields((30, 15), (15, 40), (45, 40), 8)
 
