@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.routers import scan as scan_module
 from app.vision.season_classifier import SeasonClassificationResult
-from app.vision.skin_sampling import AnchorPoints, SkinSampleResult
+from app.vision.skin_sampling import AnchorPoints, ScleraSampleResult, SkinSampleResult
 
 client = TestClient(app)
 
@@ -128,6 +128,48 @@ def test_scan_manual_returns_season_and_swatches_for_well_lit_patches():
     for swatch in body["swatches"]:
         assert swatch["name"]
         assert swatch["hex"].startswith("#")
+
+
+def test_scan_manual_samples_at_dragged_anchors_and_normalizes_against_sclera(monkeypatch):
+    # The manual path must get the same sclera lighting correction /scan
+    # does - otherwise the same boxes on the same photo can land on a
+    # different season depending on which endpoint produced them.
+    captured = {}
+    sclera_rgb = (230, 225, 220)
+
+    def _fake_sample_skin_regions(image_bgr, anchors=None):
+        captured["anchors"] = anchors
+        return SkinSampleResult(
+            success=True,
+            forehead_rgb=(216, 165, 152),
+            left_cheek_rgb=(208, 158, 145),
+            right_cheek_rgb=(222, 170, 158),
+            anchors=anchors,
+            sclera=ScleraSampleResult(success=True, sclera_rgb=sclera_rgb),
+        )
+
+    real_classify_season = scan_module.classify_season
+
+    def _spy_classify_season(*args, **kwargs):
+        captured["sclera_rgb"] = kwargs.get("sclera_rgb")
+        return real_classify_season(*args, **kwargs)
+
+    monkeypatch.setattr(scan_module, "sample_skin_regions", _fake_sample_skin_regions)
+    monkeypatch.setattr(scan_module, "classify_season", _spy_classify_season)
+
+    response = client.post(
+        "/api/scan/manual",
+        files={"photo": ("patch.jpg", _solid_jpeg_bytes((216, 165, 152), size=60), "image/jpeg")},
+        data=_manual_form_fields((30, 15), (15, 40), (45, 40), 8),
+    )
+
+    assert response.status_code == 200
+    assert captured["sclera_rgb"] == sclera_rgb
+    anchors = captured["anchors"]
+    assert anchors.forehead.tolist() == [30.0, 15.0]
+    assert anchors.left_cheek.tolist() == [15.0, 40.0]
+    assert anchors.right_cheek.tolist() == [45.0, 40.0]
+    assert anchors.patch_half_size == 8.0
 
 
 def test_scan_manual_reports_patch_clipped():

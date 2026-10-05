@@ -109,9 +109,12 @@ class SkinSampleResult:
     error: SampleFailureReason | None = None
     anchors: AnchorPoints | None = None
     # Only ever populated by sample_skin_regions (needs the full landmark
-    # array, which the manual-adjustment recovery flow's sample_at_anchors
-    # doesn't have) - None there, and whenever the sclera itself couldn't be
-    # reliably read for this photo.
+    # array, which bare sample_at_anchors doesn't have) - including for the
+    # manual-adjustment recovery flow, which re-detects the face on the
+    # resubmitted photo just to read the sclera. None when no face was
+    # found to read it from (only possible with caller-supplied anchors).
+    # A ScleraSampleResult with success=False when the sclera itself
+    # couldn't be reliably read for this photo.
     sclera: ScleraSampleResult | None = None
 
 
@@ -420,11 +423,13 @@ def _face_bbox_area(points: np.ndarray) -> float:
 def sample_at_anchors(image_bgr: np.ndarray, anchors: AnchorPoints) -> SkinSampleResult:
     """Sample forehead/left-cheek/right-cheek patches at caller-supplied anchors.
 
-    Shared core of `sample_skin_regions` (anchors from face detection) and the
-    manual-adjustment recovery flow (anchors dragged by the user and resent
-    against the same photo bytes, since nothing here persists the image).
-    Always attaches `anchors` to the result, success or failure, so the
-    caller can echo back exactly which coordinates were used.
+    Patch-sampling core of `sample_skin_regions`, whether its anchors come
+    from face detection or from the manual-adjustment recovery flow (dragged
+    by the user and resent against the same photo bytes, since nothing here
+    persists the image). Pure pixel work - no face detection, so no sclera
+    reading either; call `sample_skin_regions` for that. Always attaches
+    `anchors` to the result, success or failure, so the caller can echo back
+    exactly which coordinates were used.
     """
     image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
     image_lab = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2LAB)
@@ -453,35 +458,51 @@ def sample_at_anchors(image_bgr: np.ndarray, anchors: AnchorPoints) -> SkinSampl
     )
 
 
-def sample_skin_regions(image_bgr: np.ndarray) -> SkinSampleResult:
-    """Detect a face and median-sample forehead/left-cheek/right-cheek color.
-
-    `image_bgr` is a decoded image array (e.g. from `cv2.imdecode`), in
-    OpenCV's default BGR channel order. If multiple faces are found, the
-    largest (by bounding-box area) is used, on the assumption this is a
-    single-subject selfie. Never raises for "expected" bad input — a
-    missing or unusable face comes back as `success=False` with a reason,
-    so the API layer can turn it into a "please retake your photo" response.
-    """
-    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-    mp_image = Image(image_format=ImageFormat.SRGB, data=image_rgb)
-
-    result = _landmarker().detect(mp_image)
+def _detect_largest_face(image_rgb: np.ndarray) -> np.ndarray | None:
+    """(N, 2) pixel-coordinate landmarks of the largest detected face, or
+    None if there isn't one. Largest by bounding-box area, on the assumption
+    this is a single-subject selfie."""
+    result = _landmarker().detect(Image(image_format=ImageFormat.SRGB, data=image_rgb))
     if not result.face_landmarks:
-        return SkinSampleResult(success=False, error="no_face_detected")
+        return None
 
     height, width = image_rgb.shape[:2]
     faces = [
         np.array([(landmark.x * width, landmark.y * height) for landmark in landmarks])
         for landmarks in result.face_landmarks
     ]
-    largest_face = max(faces, key=_face_bbox_area)
+    return max(faces, key=_face_bbox_area)
 
-    anchors = compute_anchor_points(largest_face)
+
+def sample_skin_regions(image_bgr: np.ndarray, anchors: AnchorPoints | None = None) -> SkinSampleResult:
+    """Detect a face and median-sample forehead/left-cheek/right-cheek color.
+
+    `image_bgr` is a decoded image array (e.g. from `cv2.imdecode`), in
+    OpenCV's default BGR channel order. Never raises for "expected" bad
+    input — a missing or unusable face comes back as `success=False` with a
+    reason, so the API layer can turn it into a "please retake your photo"
+    response.
+
+    `anchors`, when given, overrides where the patches are sampled (the
+    manual-adjustment recovery flow: boxes the user dragged into place).
+    The face is still detected, purely to read the sclera as this photo's
+    lighting reference - the same correction the automatic path gets, so
+    the same boxes on the same photo classify the same way through either
+    path. With caller-supplied anchors a missing face isn't a failure: the
+    patches are still sampled and `sclera` is just left None, falling back
+    to uncorrected color.
+    """
+    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+    face = _detect_largest_face(image_rgb)
+    if face is None and anchors is None:
+        return SkinSampleResult(success=False, error="no_face_detected")
+
+    if anchors is None:
+        anchors = compute_anchor_points(face)
     sample = sample_at_anchors(image_bgr, anchors)
-    if not sample.success:
+    if not sample.success or face is None:
         return sample
 
     image_lab = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2LAB)
-    sclera = sample_sclera(image_rgb, image_lab, largest_face)
+    sclera = sample_sclera(image_rgb, image_lab, face)
     return replace(sample, sclera=sclera)

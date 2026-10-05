@@ -45,7 +45,7 @@ def _stub_successful_pipeline(monkeypatch) -> None:
     monkeypatch.setattr(
         scan_module,
         "sample_skin_regions",
-        lambda image_bgr: SkinSampleResult(
+        lambda image_bgr, anchors=None: SkinSampleResult(
             success=True,
             forehead_rgb=(210, 180, 170),
             left_cheek_rgb=(210, 180, 170),

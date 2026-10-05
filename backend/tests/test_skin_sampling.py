@@ -1,8 +1,10 @@
 import numpy as np
 import pytest
 
+from app.vision import skin_sampling
 from app.vision.skin_sampling import (
     AnchorPoints,
+    ScleraSampleResult,
     compute_anchor_points,
     patch_clipped_fraction,
     sample_at_anchors,
@@ -145,6 +147,58 @@ def test_sample_skin_regions_reports_no_face_detected_for_blank_image():
 
     assert result.success is False
     assert result.error == "no_face_detected"
+
+
+def test_sample_skin_regions_with_anchors_samples_even_without_a_face():
+    # Manual-adjustment flow: the user's dragged boxes are still sampled when
+    # no face is found - there's just no sclera to normalize against, so
+    # classification falls back to uncorrected color.
+    blank_image = np.full((480, 640, 3), 200, dtype=np.uint8)
+    anchors = AnchorPoints(
+        forehead=np.array([320.0, 100.0]),
+        left_cheek=np.array([250.0, 300.0]),
+        right_cheek=np.array([390.0, 300.0]),
+        patch_half_size=20.0,
+    )
+
+    result = sample_skin_regions(blank_image, anchors=anchors)
+
+    assert result.success is True
+    assert result.forehead_rgb == (200, 200, 200)
+    assert result.anchors is anchors
+    assert result.sclera is None
+
+
+def test_sample_skin_regions_with_anchors_samples_there_and_reads_sclera_from_detected_face(monkeypatch):
+    # Manual-adjustment flow with a detectable face: patches come from the
+    # caller's anchors, not the detected face's own computed ones, while the
+    # sclera is still read from that face - the same lighting reference the
+    # automatic path gets.
+    image_bgr = np.full((600, 600, 3), 150, dtype=np.uint8)
+    face = _synthetic_landmarks()
+    anchors = AnchorPoints(
+        forehead=np.array([100.0, 100.0]),
+        left_cheek=np.array([80.0, 200.0]),
+        right_cheek=np.array([120.0, 200.0]),
+        patch_half_size=10.0,
+    )
+    sclera = ScleraSampleResult(success=True, sclera_rgb=(230, 225, 220))
+    sclera_calls = []
+
+    monkeypatch.setattr(skin_sampling, "_detect_largest_face", lambda image_rgb: face)
+
+    def _fake_sample_sclera(image_rgb, image_lab, points):
+        sclera_calls.append(points)
+        return sclera
+
+    monkeypatch.setattr(skin_sampling, "sample_sclera", _fake_sample_sclera)
+
+    result = sample_skin_regions(image_bgr, anchors=anchors)
+
+    assert result.success is True
+    assert result.anchors is anchors
+    assert result.sclera is sclera
+    assert len(sclera_calls) == 1 and sclera_calls[0] is face
 
 
 def test_sample_at_anchors_returns_success_for_well_lit_patches():

@@ -16,7 +16,7 @@ from app.rate_limit import limiter, scan_limit_value
 from app.scans_repo import consume_retake, create_scan, get_scan
 from app.schemas import SwatchResponse, parse_scan_id_or_404, to_swatch_responses
 from app.vision.season_classifier import Season, SeasonClassificationResult, classify_season
-from app.vision.skin_sampling import AnchorPoints, sample_at_anchors, sample_skin_regions
+from app.vision.skin_sampling import RGB, AnchorPoints, SkinSampleResult, sample_skin_regions
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +114,12 @@ def _persist_scan(season: Season, swatches: list[SwatchResponse], paragraph: str
     return scan_id
 
 
+def _sclera_rgb(sample: SkinSampleResult) -> RGB | None:
+    """This photo's sclera lighting reference for classify_season, or None
+    (classify on uncorrected color) when it couldn't be reliably read."""
+    return sample.sclera.sclera_rgb if sample.sclera is not None and sample.sclera.success else None
+
+
 def _hue_difference_metadata(result: SeasonClassificationResult) -> dict:
     """Event metadata carrying the cross-patch ΔH* this scan was judged on,
     so real-world values can be compared against the classifier's
@@ -183,7 +189,7 @@ async def scan(
             )
         raise HTTPException(status_code=422, detail=_SAMPLE_ERROR_MESSAGES[sample.error])
 
-    sclera_rgb = sample.sclera.sclera_rgb if sample.sclera is not None and sample.sclera.success else None
+    sclera_rgb = _sclera_rgb(sample)
     result = classify_season(sample.forehead_rgb, sample.left_cheek_rgb, sample.right_cheek_rgb, sclera_rgb=sclera_rgb)
     if not result.success:
         assert sample.anchors is not None  # sampling succeeded, so anchors are always set
@@ -240,6 +246,9 @@ async def scan_manual(
     Recovery path for a low-confidence /scan result: the caller resends the
     same photo bytes (nothing here persists the image either, same as
     /scan) alongside forehead/cheek centers the user dragged into place.
+    The face is re-detected on those bytes only to read the sclera, so the
+    result gets the same lighting correction /scan applies - the same boxes
+    on the same photo must classify the same way through either endpoint.
     """
     image_bgr = await _read_and_decode_photo(photo)
     height, width = image_bgr.shape[:2]
@@ -263,7 +272,7 @@ async def scan_manual(
 
     log_event("scan_manual_started")
 
-    sample = sample_at_anchors(image_bgr, anchors)
+    sample = sample_skin_regions(image_bgr, anchors=anchors)
     if not sample.success:
         if sample.error == "patch_clipped":
             log_event("scan_low_confidence", {"reason": "patch_clipped", "manual": True})
@@ -279,7 +288,8 @@ async def scan_manual(
         # only for defensive completeness.
         raise HTTPException(status_code=422, detail=_SAMPLE_ERROR_MESSAGES[sample.error])
 
-    result = classify_season(sample.forehead_rgb, sample.left_cheek_rgb, sample.right_cheek_rgb)
+    sclera_rgb = _sclera_rgb(sample)
+    result = classify_season(sample.forehead_rgb, sample.left_cheek_rgb, sample.right_cheek_rgb, sclera_rgb=sclera_rgb)
     if not result.success:
         log_event(
             "scan_low_confidence",
@@ -299,7 +309,12 @@ async def scan_manual(
     background_tasks.add_task(
         log_event,
         "scan_manual_completed",
-        {"season": season, "scan_id": scan_id, **_hue_difference_metadata(result)},
+        {
+            "season": season,
+            "scan_id": scan_id,
+            "depth_normalized": sclera_rgb is not None,
+            **_hue_difference_metadata(result),
+        },
     )
     return ScanResponse(scan_id=scan_id, season=season, swatches=swatches, paragraph=paragraph)
 
@@ -347,7 +362,7 @@ async def retake_scan(
             )
         raise HTTPException(status_code=422, detail=_SAMPLE_ERROR_MESSAGES[sample.error])
 
-    sclera_rgb = sample.sclera.sclera_rgb if sample.sclera is not None and sample.sclera.success else None
+    sclera_rgb = _sclera_rgb(sample)
     result = classify_season(sample.forehead_rgb, sample.left_cheek_rgb, sample.right_cheek_rgb, sclera_rgb=sclera_rgb)
     if not result.success:
         assert sample.anchors is not None  # sampling succeeded, so anchors are always set
