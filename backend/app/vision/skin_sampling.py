@@ -41,7 +41,9 @@ _RIGHT_IRIS = vision.FaceLandmarksConnections.FACE_LANDMARKS_RIGHT_IRIS
 _FOREHEAD_OFFSET_RATIO = 0.20  # of chin-to-brow distance, above the brows
 _CHEEK_DOWN_RATIO = 0.45  # of interocular distance, below the eyes
 # Of half the face oval's own width, measured out from eye-line center - not
-# a multiple of interocular distance. Interocular-to-face-width isn't
+# a multiple of interocular distance. The width is taken along the eye line,
+# not the image x-axis: a tilted head inflates its x-extent, which pushed
+# this same 0.55 out to 0.74 of the true half-width at 35 degrees of roll. Interocular-to-face-width isn't
 # guaranteed to scale consistently across face shapes, and tuning this as a
 # multiple of interocular distance (twice, across two sessions) kept landing
 # right at the jaw/ear boundary instead of mid-cheek once measured against
@@ -138,37 +140,45 @@ def _centroid(points: np.ndarray, indices: list[int]) -> np.ndarray:
     return points[indices].mean(axis=0)
 
 
-def _lowest_point(points: np.ndarray, indices: list[int]) -> np.ndarray:
-    subset = points[indices]
-    return subset[np.argmax(subset[:, 1])]
-
-
 def compute_anchor_points(points: np.ndarray) -> AnchorPoints:
     """Derive forehead/cheek sample centers from face landmark pixel coordinates.
 
     `points` is an (N, 2) array of (x, y) pixel coordinates, N covering at
     least the eyebrow, eye, and face-oval landmark indices. Pure geometry —
     no model inference — so it's unit-testable with synthetic landmarks.
+
+    The face is measured in its own frame - along and across the eye line -
+    never against the image axes, so a tilted head moves the anchors with
+    the face instead of relative to it.
     """
     brow_center = _centroid(
         points, _connection_indices(_LEFT_EYEBROW) + _connection_indices(_RIGHT_EYEBROW)
     )
-    oval_indices = _connection_indices(_FACE_OVAL)
-    chin = _lowest_point(points, oval_indices)
-    oval_x = points[oval_indices][:, 0]
-    half_face_width = (oval_x.max() - oval_x.min()) / 2
     left_eye = _centroid(points, _connection_indices(_LEFT_EYE))
     right_eye = _centroid(points, _connection_indices(_RIGHT_EYE))
-
-    face_axis = brow_center - chin  # "up" the face, from chin toward brow
-    face_height = np.linalg.norm(face_axis)
-    face_up = face_axis / face_height
-    face_down = -face_up
 
     interocular = np.linalg.norm(right_eye - left_eye)
     eye_center = (left_eye + right_eye) / 2
     left_out = (left_eye - eye_center) / (np.linalg.norm(left_eye - eye_center) + 1e-6)
     right_out = (right_eye - eye_center) / (np.linalg.norm(right_eye - eye_center) + 1e-6)
+
+    # Perpendicular to the eye line, pointing down the face (+y in image
+    # coordinates holds for any selfie tilted less than 90 degrees).
+    across_eye_line = np.array([-left_out[1], left_out[0]])
+    if across_eye_line[1] < 0:
+        across_eye_line = -across_eye_line
+
+    oval_offsets = points[_connection_indices(_FACE_OVAL)] - eye_center
+    # The chin is the oval point furthest down the face - not the lowest
+    # point in the image, which on a tilted head is a point along the jaw.
+    chin = eye_center + oval_offsets[np.argmax(oval_offsets @ across_eye_line)]
+    oval_along_eye_line = oval_offsets @ left_out
+    half_face_width = (oval_along_eye_line.max() - oval_along_eye_line.min()) / 2
+
+    face_axis = brow_center - chin  # "up" the face, from chin toward brow
+    face_height = np.linalg.norm(face_axis)
+    face_up = face_axis / face_height
+    face_down = -face_up
 
     forehead = brow_center + face_up * face_height * _FOREHEAD_OFFSET_RATIO
     cheek_down_offset = face_down * interocular * _CHEEK_DOWN_RATIO

@@ -22,13 +22,16 @@ def _synthetic_landmarks() -> np.ndarray:
     """
     points = np.full((468, 2), 300.0)
 
-    # Face oval: a ring of points, chin (lowest) at y=500.
+    # Face oval: an ellipse taller than it is wide, chin (lowest) at y=500.
+    # Deliberately not a circle - a circle's extent is the same in every
+    # direction, so it can't catch geometry that's only right for an
+    # upright head (see test_compute_anchor_points_is_equivariant_under_head_roll).
     from app.vision.skin_sampling import _FACE_OVAL, _LEFT_EYE, _LEFT_EYEBROW, _RIGHT_EYE, _RIGHT_EYEBROW, _connection_indices
 
     oval_indices = _connection_indices(_FACE_OVAL)
     for i, idx in enumerate(oval_indices):
         angle = 2 * np.pi * i / len(oval_indices)
-        points[idx] = (300 + 100 * np.sin(angle), 400 + 100 * np.cos(angle))
+        points[idx] = (300 + 80 * np.sin(angle), 400 + 100 * np.cos(angle))
 
     left_eyebrow_indices = _connection_indices(_LEFT_EYEBROW)
     right_eyebrow_indices = _connection_indices(_RIGHT_EYEBROW)
@@ -64,6 +67,30 @@ def test_compute_anchor_points_places_forehead_above_brows_between_eyes():
     assert anchors.right_cheek[0] > 340
 
     assert anchors.patch_half_size > 0
+
+
+@pytest.mark.parametrize("roll_deg", [-30, 15, 30])
+def test_compute_anchor_points_is_equivariant_under_head_roll(roll_deg: float):
+    # A tilted head should move the sample points WITH the face, not
+    # relative to it: anchors computed from rotated landmarks must equal the
+    # upright anchors rotated the same way. Measuring the face against the
+    # image axes instead (e.g. its x-extent for width, its lowest point for
+    # the chin) breaks this, and on real faces pushed the cheek samples from
+    # 0.55 of the half-width out to 0.74 at 35 degrees of roll.
+    points = _synthetic_landmarks()
+    eye_center = np.array([300.0, 300.0])
+    theta = np.radians(roll_deg)
+    rotation = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]])
+
+    def rotate(p: np.ndarray) -> np.ndarray:
+        return (p - eye_center) @ rotation.T + eye_center
+
+    upright = compute_anchor_points(points)
+    rolled = compute_anchor_points(rotate(points))
+
+    for name in ("forehead", "left_cheek", "right_cheek"):
+        np.testing.assert_allclose(getattr(rolled, name), rotate(getattr(upright, name)), atol=0.5, err_msg=name)
+    assert rolled.patch_half_size == pytest.approx(upright.patch_half_size)
 
 
 def test_sample_patch_rgb_rejects_shadow_and_highlight_outliers():
