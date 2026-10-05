@@ -494,8 +494,9 @@ def _detect_largest_face(image_rgb: np.ndarray) -> np.ndarray | None:
 def sample_skin_regions(image_bgr: np.ndarray, anchors: AnchorPoints | None = None) -> SkinSampleResult:
     """Detect a face and median-sample forehead/left-cheek/right-cheek color.
 
-    `image_bgr` is a decoded image array (e.g. from `cv2.imdecode`), in
-    OpenCV's default BGR channel order. Never raises for "expected" bad
+    `image_bgr` is a decoded image array in sRGB (from
+    `image_decode.decode_image`, which converts embedded color profiles
+    like Display P3), in OpenCV's default BGR channel order. Never raises for "expected" bad
     input — a missing or unusable face comes back as `success=False` with a
     reason, so the API layer can turn it into a "please retake your photo"
     response.

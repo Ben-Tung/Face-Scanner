@@ -197,14 +197,12 @@ def _stub_sampling_failure(monkeypatch, error: str) -> None:
     )
 
 
-def _stub_inconsistent_patches(monkeypatch) -> None:
+def _stub_classification_failure(monkeypatch, error: str) -> None:
     _stub_successful_pipeline(monkeypatch)
     monkeypatch.setattr(
         scan_module,
         "classify_season",
-        lambda *args, **kwargs: SeasonClassificationResult(
-            success=False, error="inconsistent_patches", max_hue_difference=16.0
-        ),
+        lambda *args, **kwargs: SeasonClassificationResult(success=False, error=error),
     )
 
 
@@ -213,9 +211,10 @@ def _stub_inconsistent_patches(monkeypatch) -> None:
     [
         lambda mp: _stub_sampling_failure(mp, "patch_clipped"),
         lambda mp: _stub_sampling_failure(mp, "face_out_of_frame"),
-        _stub_inconsistent_patches,
+        lambda mp: _stub_classification_failure(mp, "inconsistent_patches"),
+        lambda mp: _stub_classification_failure(mp, "color_cast"),
     ],
-    ids=["patch_clipped", "face_out_of_frame", "inconsistent_patches"],
+    ids=["patch_clipped", "face_out_of_frame", "inconsistent_patches", "color_cast"],
 )
 def test_retake_low_confidence_message_never_mentions_boxes(monkeypatch, stub):
     """The retake screen has no drag-the-boxes adjuster (retake-capture.tsx

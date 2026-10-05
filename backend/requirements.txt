@@ -8,6 +8,9 @@ pydantic-settings~=2.7
 mediapipe~=1.0
 opencv-python-headless~=5.0
 numpy~=2.5
+# ICC color management for uploads (Display P3 -> sRGB, see
+# app/vision/image_decode.py) - wheels bundle littleCMS
+pillow~=12.3
 
 # Multipart form parsing — required by FastAPI's UploadFile/File()
 python-multipart~=0.0

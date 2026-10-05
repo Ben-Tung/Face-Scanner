@@ -20,9 +20,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import cv2
 import pytest
 
+from app.vision.image_decode import decode_image
 from app.vision.skin_sampling import _MODEL_PATH, sample_skin_regions
 from app.vision.season_classifier import SeasonClassification, classify_season
 
@@ -48,7 +48,7 @@ def _classify_corrected(photo_path: Path) -> SeasonClassification | None:
     actually applied (sampling failed, or the sclera itself was unreadable),
     since a pairwise check against uncorrected depth_lightness would prove
     nothing about the correction."""
-    image_bgr = cv2.imread(str(photo_path))
+    image_bgr = decode_image(photo_path.read_bytes())
     sample = sample_skin_regions(image_bgr)
     if not sample.success or sample.sclera is None or not sample.sclera.success:
         return None

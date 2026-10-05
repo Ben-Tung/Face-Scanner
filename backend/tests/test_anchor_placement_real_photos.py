@@ -23,6 +23,7 @@ import numpy as np
 import pytest
 from mediapipe import Image, ImageFormat
 
+from app.vision.image_decode import decode_image
 from app.vision.skin_sampling import (
     _FACE_OVAL,
     _LEFT_EYEBROW,
@@ -59,7 +60,7 @@ pytestmark = pytest.mark.skipif(
 
 
 def _detect_largest_face(image_path: Path) -> np.ndarray:
-    image_bgr = cv2.imread(str(image_path))
+    image_bgr = decode_image(image_path.read_bytes())
     image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
     mp_image = Image(image_format=ImageFormat.SRGB, data=image_rgb)
     result = _landmarker().detect(mp_image)

@@ -13,10 +13,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import cv2
-
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from app.vision.image_decode import decode_image
 from app.vision.season_classifier import _HUE_DIFFERENCE_THRESHOLD, classify_season, hue_and_chroma, rgb_to_lab
 from app.vision.skin_sampling import sample_skin_regions
 
@@ -36,7 +35,7 @@ def main() -> None:
         raise SystemExit(1)
 
     image_path = Path(sys.argv[1])
-    image_bgr = cv2.imread(str(image_path))
+    image_bgr = decode_image(image_path.read_bytes())
     if image_bgr is None:
         print(f"Could not read image: {image_path}", file=sys.stderr)
         raise SystemExit(1)

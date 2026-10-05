@@ -26,11 +26,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import cv2
 import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.vision.image_decode import decode_image
 from app.vision.skin_sampling import _MODEL_PATH, sample_skin_regions
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "photos"
@@ -59,7 +59,7 @@ def test_manual_scan_with_untouched_boxes_matches_automatic_scan(photo_path: Pat
     if automatic.status_code != 200:
         pytest.skip(f"automatic scan rejected this photo ({automatic.status_code}), nothing to compare against")
 
-    anchors = sample_skin_regions(cv2.imread(str(photo_path))).anchors
+    anchors = sample_skin_regions(decode_image(photo_bytes)).anchors
     manual = client.post(
         "/api/scan/manual",
         files={"photo": (photo_path.name, photo_bytes, "image/jpeg")},

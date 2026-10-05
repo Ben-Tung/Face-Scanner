@@ -83,39 +83,42 @@ _SCLERA_CORRECTION_CLAMP_L = 20.0
 # _HUE_DIFFERENCE_THRESHOLD (every patch shifts together, so they still agree
 # with each other) catch it - see normalize_undertone_ab.
 #
-# _SCLERA_REFERENCE_A/_SCLERA_REFERENCE_B are NOT the mean over the original
-# 9-photo fixture batch (unlike _SCLERA_REFERENCE_L, which still is) - real-
-# photo validation under three lighting conditions (warm incandescent bulb,
-# a "white" LED, outdoor overcast daylight) on one subject showed the
-# batch-derived a*/b* mean produced inconsistent undertone across conditions
-# for that subject (warm bulb read "warm", the other two read "cool", a clear
-# 6-7deg gap) - i.e. it failed on exactly the case this correction exists to
-# fix. The batch's provenance is unknown/unvalidated (see _SCLERA_REFERENCE_L
-# comment), so it likely carries its own systematic color-temperature bias
-# from whatever lighting those 9 photos happened to be shot under. The
-# outdoor overcast photo is the one condition with a real physical claim to
-# being color-neutral (diffuse skylight, no artificial-light color cast, no
-# indoor-wall bounce contamination), so these constants are calibrated from
-# that single photo's sclera a*/b* instead. Recalibrating this way was
-# validated empirically: it's the choice (checked against a batch-derived
-# reference, a batch+daylight-pooled reference, and a same-subject
-# 3-condition self-reference) that actually produces undertone agreement
-# across all three lighting conditions for the one subject tested - see
-# backend/tests/test_undertone_normalization_real_photos.py. Caveat this
-# carries forward: single-subject, single-photo calibration, and even under
-# it this subject's white/daylight readings land only just over the warm/cool
-# threshold (50.1-50.7deg vs. the 50deg cutoff) - a thin, not robust, margin.
-# Revisit with more subjects/outdoor photos over time, the same "first-pass,
-# recompute as it grows" spirit as _SCLERA_REFERENCE_L.
+# _SCLERA_REFERENCE_A/_SCLERA_REFERENCE_B are the sclera a*/b* of one
+# outdoor overcast-daylight photo (SampleLightDaylight), not the mean over
+# the 9-photo fixture batch the way _SCLERA_REFERENCE_L is. Overcast
+# daylight is the one condition with a real physical claim to being
+# color-neutral (diffuse skylight, no artificial-light cast, no indoor-wall
+# bounce), while the batch's lighting provenance is unknown and, when
+# tried, it reproduced the cross-lighting inconsistency this correction
+# exists to fix.
 #
-# _SCLERA_CORRECTION_CLAMP_AB bounds the correction vector's magnitude (see
-# normalize_undertone_ab), not each axis independently. Re-checked against
-# this reference across both fixture batches: still non-binding (largest
-# observed correction ~18.1, the warm-bulb validation photo), so left
-# unchanged rather than tuned to a batch that doesn't trip it.
-_SCLERA_REFERENCE_A = 3.72
-_SCLERA_REFERENCE_B = 5.63
-_SCLERA_CORRECTION_CLAMP_AB = 20.0
+# Read color-managed (see image_decode.py). The previous values (3.72, 5.63)
+# were this same sclera with the photo's Display P3 pixels misread as sRGB;
+# that misread, plus a reference calibrated from it, is what made one
+# subject's warm-bulb, white-LED and daylight photos appear to agree on
+# "warm". Read correctly, 5 of that subject's 6 photos agree on cool
+# (36.7-46.2deg corrected hue), and the warm-bulb photo can't be corrected
+# into line by any variant tried (this additive shift, a 30 clamp, or full
+# Bradford chromatic adaptation). It's rejected instead - see
+# _MAX_COLOR_CAST_AB. Caveat this carries forward: single-subject,
+# single-photo calibration. Revisit with more subjects and outdoor photos,
+# the same "first-pass, recompute as it grows" spirit as _SCLERA_REFERENCE_L
+# - scripts/classify_photo.py on the daylight photo prints the value.
+_SCLERA_REFERENCE_A = 4.91
+_SCLERA_REFERENCE_B = 6.07
+
+# A photo whose sclera sits this far from the reference in a*/b* has too
+# strong a color cast to correct reliably, so it's rejected with a "retake
+# in daylight" message rather than classified. Measured as the magnitude of
+# the correction vector (see sclera_color_cast), never the skin-to-sclera
+# gap. Against the reference above, every accepted fixture photo reads 12.0
+# or less (Sample9 12.0, Sample3 11.7, everything else under 9); the one
+# warm-incandescent-bulb photo reads 21.9 and stays warm after correction
+# while the same subject's other five photos read cool. 16.0 sits between
+# the two, but the rejection side rests on that single photo - the
+# magnitude is logged on every scan event so this can be tuned against
+# real traffic.
+_MAX_COLOR_CAST_AB = 16.0
 
 _D65_WHITE = (0.95047, 1.0, 1.08883)  # Xn, Yn, Zn
 
@@ -127,7 +130,7 @@ _SEASON_BY_UNDERTONE_AND_DEPTH: dict[tuple[Undertone, Depth], Season] = {
 }
 
 
-ClassificationFailureReason = Literal["inconsistent_patches"]
+ClassificationFailureReason = Literal["inconsistent_patches", "color_cast"]
 
 
 @dataclass(frozen=True)
@@ -160,6 +163,10 @@ class SeasonClassificationResult:
     # failure, so real scans can be logged against
     # _HUE_DIFFERENCE_THRESHOLD to keep tuning it.
     max_hue_difference: float | None = None
+    # This photo's lighting cast (see sclera_color_cast), whenever a sclera
+    # reading was available - success or failure - logged against
+    # _MAX_COLOR_CAST_AB the same way.
+    color_cast: float | None = None
 
 
 def _srgb_to_linear(channel: int) -> float:
@@ -288,47 +295,36 @@ def normalize_undertone_ab(skin_a: float, skin_b: float, sclera_a: float, sclera
     (a, b), the same way sclera L* estimates and cancels a shared exposure
     shift for depth. A no-op when sclera (a, b) already equals the reference.
 
-    `_SCLERA_CORRECTION_CLAMP_AB` bounds the MAGNITUDE of the correction
-    vector (hypot(correction_a, correction_b)) - how large a color cast this
-    photo's lighting is allowed to be inferred as - rescaling both components
-    proportionally (preserving the cast's inferred hue direction) if exceeded.
-    It does NOT bound (skin_a - sclera_a, skin_b - sclera_b) (the
-    skin-to-sclera color contrast), which is deliberately left unclamped:
-    that contrast is expected to be large for genuinely warm, high-chroma
-    skin even under perfectly neutral light, and clamping it would cap how
-    warm/saturated the classifier could ever read someone - the same failure
-    mode normalize_depth_lightness's clamp avoids on the lightness axis (see
-    that function's docstring). Concretely: normalize_undertone_ab(35.0, 45.0,
-    _SCLERA_REFERENCE_A, _SCLERA_REFERENCE_B) - naturally warm, high-chroma
-    skin under exactly reference-quality neutral light - correctly returns
-    (35.0, 45.0) unchanged, even though skin (a, b) sits far from the
-    sclera's own (a, b), because the sclera itself shows zero deviation from
-    reference, i.e. zero inferred lighting cast.
-
-    Unlike normalize_depth_lightness, the result isn't clamped to a fixed
-    output range afterward - a*/b* have no natural bound anywhere in this
-    module (hue_and_chroma accepts any real-valued input), unlike L*'s
+    Unclamped: casts too strong to trust are rejected before this runs (see
+    sclera_color_cast and _MAX_COLOR_CAST_AB). Nor is the result clamped to
+    a fixed output range afterward - a*/b* have no natural bound anywhere in
+    this module (hue_and_chroma accepts any real-valued input), unlike L*'s
     physical 0-100 range.
     """
     # correction is (reference - sclera), a pure read on how atypical THIS
     # PHOTO's lighting cast was - not (skin - sclera), which mixes in this
-    # PERSON's actual coloring and has nothing to do with lighting. Clamping
-    # must happen here, on the correction vector's magnitude alone, before
-    # skin_a/skin_b ever enter the expression - clamping per axis instead
-    # would both under-bound diagonal casts (each axis can independently sit
-    # right at the cap while the vector's true magnitude exceeds it) and
-    # distort the cast's inferred hue direction when only one axis clamps -
-    # see the docstring's worked example.
+    # PERSON's actual coloring and has nothing to do with lighting.
     correction_a = _SCLERA_REFERENCE_A - sclera_a
     correction_b = _SCLERA_REFERENCE_B - sclera_b
-
-    magnitude = math.hypot(correction_a, correction_b)
-    if magnitude > _SCLERA_CORRECTION_CLAMP_AB:
-        scale = _SCLERA_CORRECTION_CLAMP_AB / magnitude
-        correction_a *= scale
-        correction_b *= scale
-
     return skin_a + correction_a, skin_b + correction_b
+
+
+def sclera_color_cast(sclera_lab: Lab) -> float:
+    """How strong a color cast this photo's lighting has, in a*/b* units:
+    the magnitude of the correction normalize_undertone_ab would apply.
+
+    Judged from the sclera's own deviation from the reference alone - NEVER
+    from the skin-to-sclera gap (skin_a - sclera_a, skin_b - sclera_b). That
+    gap is expected to be large for genuinely warm, high-chroma skin even
+    under perfectly neutral light, so judging it would reject (or, as the
+    clamp this replaced risked, flatten) exactly the warmest, most saturated
+    skin tones - the same failure mode normalize_depth_lightness's clamp
+    avoids on the lightness axis. Concretely: skin at (35.0, 45.0) under a
+    sclera reading exactly (_SCLERA_REFERENCE_A, _SCLERA_REFERENCE_B) has a
+    cast of 0, however far the skin sits from the sclera.
+    """
+    _, sclera_a, sclera_b = sclera_lab
+    return math.hypot(_SCLERA_REFERENCE_A - sclera_a, _SCLERA_REFERENCE_B - sclera_b)
 
 
 def classify_season(
@@ -356,22 +352,32 @@ def classify_season(
     (`normalize_undertone_ab`) against this photo's own lighting — see those
     functions. Both fall back to the raw averaged Lab when no sclera reading
     is available. The cross-patch hue check above runs on each raw patch's
-    own Lab and returns before any of this, so it's unaffected either
-    way: a uniform color cast shifts all three patches together and doesn't
-    change their agreement with each other, which is exactly why that check
-    can't catch it and a separate sclera-based correction is needed.
+    own Lab, so it's unaffected either way: a uniform color cast shifts all
+    three patches together and doesn't change their agreement with each
+    other, which is exactly why that check can't catch it and a separate
+    sclera-based correction is needed.
+
+    A cast too strong to correct (see `sclera_color_cast`) fails as
+    `color_cast`, checked before the hue check: dragging patches can fix
+    mixed patch readings, but nothing but a retake fixes the lighting.
     """
     labs = [rgb_to_lab(forehead_rgb), rgb_to_lab(left_cheek_rgb), rgb_to_lab(right_cheek_rgb)]
     max_hue_difference = max(hue_difference(a, b) for a, b in itertools.combinations(labs, 2))
+    sclera_lab = rgb_to_lab(sclera_rgb) if sclera_rgb is not None else None
+    color_cast = sclera_color_cast(sclera_lab) if sclera_lab is not None else None
+
+    if color_cast is not None and color_cast > _MAX_COLOR_CAST_AB:
+        return SeasonClassificationResult(
+            success=False, error="color_cast", max_hue_difference=max_hue_difference, color_cast=color_cast
+        )
     if max_hue_difference > _HUE_DIFFERENCE_THRESHOLD:
         return SeasonClassificationResult(
-            success=False, error="inconsistent_patches", max_hue_difference=max_hue_difference
+            success=False, error="inconsistent_patches", max_hue_difference=max_hue_difference, color_cast=color_cast
         )
 
     avg_lab = _average_lab(labs)
 
-    if sclera_rgb is not None:
-        sclera_lab = rgb_to_lab(sclera_rgb)
+    if sclera_lab is not None:
         corrected_a, corrected_b = normalize_undertone_ab(avg_lab[1], avg_lab[2], sclera_lab[1], sclera_lab[2])
         hue_deg, chroma = hue_and_chroma((avg_lab[0], corrected_a, corrected_b))
         depth_lightness = normalize_depth_lightness(avg_lab[0], sclera_lab[0])
@@ -400,5 +406,5 @@ def classify_season(
         depth_lightness=depth_lightness,
     )
     return SeasonClassificationResult(
-        success=True, classification=classification, max_hue_difference=max_hue_difference
+        success=True, classification=classification, max_hue_difference=max_hue_difference, color_cast=color_cast
     )

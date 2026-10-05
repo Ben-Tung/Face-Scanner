@@ -16,6 +16,8 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
+from app.vision.image_decode import decode_image
+
 
 def _jpeg_bytes_with_exif_orientation(image_bgr: np.ndarray, orientation: int) -> bytes:
     """Encode as JPEG and splice in a minimal EXIF APP1 segment declaring
@@ -52,4 +54,17 @@ def test_decode_honors_exif_orientation_like_browsers():
     # A decoder that ignores EXIF would keep shape (20, 40) - the raw sensor
     # layout. One that honors it, matching browser <img> rendering, swaps to
     # a tall portrait image.
+    assert decoded.shape[:2] == (40, 20)
+
+
+def test_decode_image_keeps_exif_orientation_like_browsers():
+    # decode_image (the decoder the scan endpoints actually use) layers ICC
+    # color management on top of cv2.imdecode - it must not lose the
+    # orientation handling pinned above along the way.
+    image_bgr = np.full((20, 40, 3), 100, dtype=np.uint8)
+    jpeg_bytes = _jpeg_bytes_with_exif_orientation(image_bgr, orientation=6)
+
+    decoded = decode_image(jpeg_bytes)
+
+    assert decoded is not None
     assert decoded.shape[:2] == (40, 20)

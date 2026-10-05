@@ -421,6 +421,46 @@ def test_scan_returns_503_when_persistence_fails(monkeypatch):
     assert response.status_code == 503
 
 
+@pytest.mark.parametrize("endpoint", ["/api/scan", "/api/scan/manual"])
+def test_color_cast_is_a_plain_retake_message_not_a_box_adjuster(monkeypatch, endpoint):
+    # No placement of the boxes can fix the photo's lighting, so a
+    # color_cast failure must not send the user to the drag-the-boxes
+    # adjuster (which the frontend opens for any structured detail).
+    monkeypatch.setattr(
+        scan_module,
+        "sample_skin_regions",
+        lambda image_bgr, anchors=None: SkinSampleResult(
+            success=True,
+            forehead_rgb=(241, 150, 92),
+            left_cheek_rgb=(241, 150, 92),
+            right_cheek_rgb=(241, 150, 92),
+            anchors=AnchorPoints(
+                forehead=np.array([30.0, 15.0]),
+                left_cheek=np.array([15.0, 40.0]),
+                right_cheek=np.array([45.0, 40.0]),
+                patch_half_size=8.0,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        scan_module,
+        "classify_season",
+        lambda *args, **kwargs: SeasonClassificationResult(success=False, error="color_cast", color_cast=21.9),
+    )
+    data = _manual_form_fields((30, 15), (15, 40), (45, 40), 8) if endpoint.endswith("manual") else None
+
+    response = client.post(
+        endpoint,
+        files={"photo": ("p.jpg", _solid_jpeg_bytes((216, 165, 152)), "image/jpeg")},
+        data=data,
+    )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert isinstance(detail, str)
+    assert "daylight" in detail
+
+
 def test_scan_reports_structured_detail_for_inconsistent_patches(monkeypatch):
     anchors = AnchorPoints(
         forehead=np.array([100.0, 80.0]),

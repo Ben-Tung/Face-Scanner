@@ -6,7 +6,6 @@ import threading
 from typing import Literal
 from uuid import uuid4
 
-import cv2
 import numpy as np
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Request, Response, UploadFile
 from pydantic import BaseModel
@@ -17,6 +16,7 @@ from app.paragraph import generate_paragraph
 from app.rate_limit import limiter, scan_limit_value
 from app.scans_repo import consume_retake, create_scan, get_scan
 from app.schemas import SwatchResponse, parse_scan_id_or_404, to_swatch_responses
+from app.vision.image_decode import decode_image
 from app.vision.season_classifier import Season, SeasonClassificationResult, classify_season
 from app.vision.skin_sampling import RGB, AnchorPoints, SkinSampleResult, sample_skin_regions
 
@@ -60,6 +60,12 @@ _CLASSIFY_ERROR_MESSAGES: dict[str, str] = {
         "a shadow, or a bright reflection over one of the boxes. Drag the boxes onto "
         "clear skin, or retake with your hair pulled back."
     ),
+    # Sent as a plain-string detail, never the structured adjust-the-boxes
+    # body: no placement of the boxes can fix the photo's lighting.
+    "color_cast": (
+        "The lighting in that photo has a strong color tint (like a warm indoor bulb), so we "
+        "can't read your skin tone accurately. Try again facing a window in daylight."
+    ),
 }
 # The retake screen has no drag-the-boxes adjuster (see retake-capture.tsx),
 # so its low-confidence messages only ever point at trying another photo.
@@ -72,6 +78,7 @@ _RETAKE_ERROR_MESSAGES: dict[str, str] = {
         "We got mixed color readings from your forehead and cheeks — usually hair, a shadow, "
         "or a bright reflection. Try another photo with your hair pulled back, in even light."
     ),
+    "color_cast": _CLASSIFY_ERROR_MESSAGES["color_cast"],
 }
 
 
@@ -124,7 +131,7 @@ def _read_upload(photo: UploadFile) -> bytes:
 
 
 def _decode_or_422(contents: bytes) -> np.ndarray:
-    image_bgr = cv2.imdecode(np.frombuffer(contents, dtype=np.uint8), cv2.IMREAD_COLOR)
+    image_bgr = decode_image(contents)
     if image_bgr is None:
         raise HTTPException(status_code=422, detail="We couldn't read that image. Try a different photo.")
     return image_bgr
@@ -154,12 +161,19 @@ def _sclera_rgb(sample: SkinSampleResult) -> RGB | None:
     return sample.sclera.sclera_rgb if sample.sclera is not None and sample.sclera.success else None
 
 
-def _hue_difference_metadata(result: SeasonClassificationResult) -> dict:
-    """Event metadata carrying the cross-patch ΔH* this scan was judged on,
-    so real-world values can be compared against the classifier's
-    inconsistent_patches threshold over time."""
-    value = result.max_hue_difference
-    return {"max_hue_difference": round(value, 2) if value is not None else None}
+def _classification_metadata(result: SeasonClassificationResult) -> dict:
+    """Event metadata carrying the measurements this scan was judged on -
+    cross-patch ΔH* and the lighting's color cast - so real-world values
+    can be compared against the classifier's inconsistent_patches and
+    color_cast thresholds over time."""
+
+    def _rounded(value: float | None) -> float | None:
+        return round(value, 2) if value is not None else None
+
+    return {
+        "max_hue_difference": _rounded(result.max_hue_difference),
+        "color_cast": _rounded(result.color_cast),
+    }
 
 
 def _patch_anchors_payload(anchors: AnchorPoints) -> PatchAnchorsPayload:
@@ -228,8 +242,10 @@ def scan(
     sclera_rgb = _sclera_rgb(sample)
     result = classify_season(sample.forehead_rgb, sample.left_cheek_rgb, sample.right_cheek_rgb, sclera_rgb=sclera_rgb)
     if not result.success:
+        log_event("scan_low_confidence", {"reason": result.error, **_classification_metadata(result)})
+        if result.error == "color_cast":
+            raise HTTPException(status_code=422, detail=_CLASSIFY_ERROR_MESSAGES["color_cast"])
         assert sample.anchors is not None  # sampling succeeded, so anchors are always set
-        log_event("scan_low_confidence", {"reason": "inconsistent_patches", **_hue_difference_metadata(result)})
         raise HTTPException(
             status_code=422,
             detail=_low_confidence_detail(
@@ -256,7 +272,7 @@ def scan(
             "season": season,
             "scan_id": scan_id,
             "depth_normalized": sclera_rgb is not None,
-            **_hue_difference_metadata(result),
+            **_classification_metadata(result),
         },
     )
     return ScanResponse(scan_id=scan_id, season=season, swatches=swatches, paragraph=paragraph)
@@ -338,8 +354,10 @@ def scan_manual(
     if not result.success:
         log_event(
             "scan_low_confidence",
-            {"reason": "inconsistent_patches", "manual": True, **_hue_difference_metadata(result)},
+            {"reason": result.error, "manual": True, **_classification_metadata(result)},
         )
+        if result.error == "color_cast":
+            raise HTTPException(status_code=422, detail=_CLASSIFY_ERROR_MESSAGES["color_cast"])
         raise HTTPException(
             status_code=422,
             detail=_low_confidence_detail(
@@ -358,7 +376,7 @@ def scan_manual(
             "season": season,
             "scan_id": scan_id,
             "depth_normalized": sclera_rgb is not None,
-            **_hue_difference_metadata(result),
+            **_classification_metadata(result),
         },
     )
     return ScanResponse(scan_id=scan_id, season=season, swatches=swatches, paragraph=paragraph)
@@ -409,9 +427,9 @@ def retake_scan(
     if not result.success:
         log_event(
             "scan_low_confidence",
-            {"reason": "inconsistent_patches", "retake": True, **_hue_difference_metadata(result)},
+            {"reason": result.error, "retake": True, **_classification_metadata(result)},
         )
-        raise HTTPException(status_code=422, detail=_RETAKE_ERROR_MESSAGES["inconsistent_patches"])
+        raise HTTPException(status_code=422, detail=_RETAKE_ERROR_MESSAGES[result.error])
 
     season = result.classification.season
     swatches = to_swatch_responses(SWATCHES_BY_SEASON[season])
@@ -430,6 +448,6 @@ def retake_scan(
     background_tasks.add_task(
         log_event,
         "retake_completed",
-        {"season": season, "scan_id": scan_id, **_hue_difference_metadata(result)},
+        {"season": season, "scan_id": scan_id, **_classification_metadata(result)},
     )
     return ScanResponse(scan_id=scan_id, season=season, swatches=swatches, paragraph=paragraph)

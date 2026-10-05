@@ -19,6 +19,7 @@ from mediapipe import Image, ImageFormat
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from app.vision.image_decode import decode_image
 from app.vision.skin_sampling import _face_bbox_area, _landmarker, compute_anchor_points
 
 _BOX_COLOR = (0, 255, 0)  # BGR
@@ -44,7 +45,7 @@ def main() -> None:
         raise SystemExit(1)
 
     image_path = Path(sys.argv[1])
-    image_bgr = cv2.imread(str(image_path))
+    image_bgr = decode_image(image_path.read_bytes())
     if image_bgr is None:
         print(f"Could not read image: {image_path}", file=sys.stderr)
         raise SystemExit(1)

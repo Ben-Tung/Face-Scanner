@@ -30,9 +30,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import cv2
 import pytest
 
+from app.vision.image_decode import decode_image
 from app.vision.season_classifier import _HUE_DIFFERENCE_THRESHOLD, classify_season
 from app.vision.skin_sampling import _MODEL_PATH, sample_skin_regions
 
@@ -50,7 +50,7 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.mark.parametrize("photo_path", PHOTO_PATHS, ids=lambda p: p.stem)
 def test_evenly_lit_photo_classifies(photo_path: Path):
-    sample = sample_skin_regions(cv2.imread(str(photo_path)))
+    sample = sample_skin_regions(decode_image(photo_path.read_bytes()))
     assert sample.success, f"sampling failed: {sample.error}"
 
     sclera_rgb = sample.sclera.sclera_rgb if sample.sclera is not None and sample.sclera.success else None

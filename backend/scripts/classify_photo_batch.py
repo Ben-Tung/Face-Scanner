@@ -24,14 +24,17 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import cv2
-
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from app.vision.image_decode import decode_image
 from app.vision.season_classifier import classify_season, rgb_to_lab
 from app.vision.skin_sampling import sample_skin_regions
 
 _DEFAULT_FIXTURES_DIR = Path(__file__).parent.parent / "tests" / "fixtures" / "photos"
+
+
+def _format_optional(value: float | None) -> str:
+    return f"{value:.1f}" if value is not None else "-"
 
 
 def main() -> None:
@@ -42,7 +45,7 @@ def main() -> None:
         raise SystemExit(1)
 
     header = (
-        f"{'photo':14s} {'raw_L':>6s} {'scl_L':>6s} {'scl_a':>6s} {'scl_b':>6s} "
+        f"{'photo':14s} {'raw_L':>6s} {'scl_L':>6s} {'scl_a':>6s} {'scl_b':>6s} {'cast':>6s} "
         f"{'depth_L':>8s} {'raw_dep':>8s} {'new_dep':>8s} "
         f"{'raw_hue':>8s} {'cor_hue':>8s} {'raw_und':>8s} {'cor_und':>8s} "
         f"{'season':>7s} sclera_status"
@@ -56,7 +59,7 @@ def main() -> None:
     sclera_b_values: list[float] = []
 
     for photo_path in photo_paths:
-        image_bgr = cv2.imread(str(photo_path))
+        image_bgr = decode_image(photo_path.read_bytes())
         if image_bgr is None:
             print(f"{photo_path.name:14s} (could not read image)")
             continue
@@ -104,13 +107,14 @@ def main() -> None:
         if not result.success:
             print(
                 f"{photo_path.name:14s} classification (corrected) failed: {result.error} "
-                f"(max ΔH* {result.max_hue_difference:.2f})"
+                f"(max ΔH* {result.max_hue_difference:.2f}, color cast {_format_optional(result.color_cast)})"
             )
             continue
 
         classification = result.classification
         print(
             f"{photo_path.name:14s} {raw_l:6.1f} {sclera_l_str:>6s} {sclera_a_str:>6s} {sclera_b_str:>6s} "
+            f"{_format_optional(result.color_cast):>6s} "
             f"{classification.depth_lightness:8.2f} {raw_depth:>8s} {classification.depth:>8s} "
             f"{raw_hue:8.1f} {classification.hue_deg:8.1f} {raw_undertone:>8s} {classification.undertone:>8s} "
             f"{classification.season:>7s} {sclera_status}"
@@ -127,7 +131,11 @@ def main() -> None:
             f"Mean sclera Lab over {len(sclera_l_values)} successful readings: "
             f"L*={mean_l:.2f} a*={mean_a:.2f} b*={mean_b:.2f}"
         )
-        print("These are the calibration values for _SCLERA_REFERENCE_L / _SCLERA_REFERENCE_A / _SCLERA_REFERENCE_B in season_classifier.py.")
+        print(
+            "Mean L* is the calibration value for _SCLERA_REFERENCE_L in season_classifier.py. "
+            "_SCLERA_REFERENCE_A/_B come from the daylight photo alone (see their comment), "
+            "and the cast column is checked against _MAX_COLOR_CAST_AB."
+        )
     else:
         print("No successful sclera readings in this batch - cannot compute reference constants.")
 
