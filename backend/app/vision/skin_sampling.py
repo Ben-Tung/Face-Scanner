@@ -9,6 +9,7 @@ calling this; nothing here persists the image.
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
@@ -413,6 +414,11 @@ def sample_sclera(image_rgb: np.ndarray, image_lab: np.ndarray, points: np.ndarr
     return ScleraSampleResult(success=True, sclera_rgb=sclera_rgb)
 
 
+# MediaPipe's synchronous task runner isn't safe to call from several threads
+# at once, and _landmarker() is one shared, cached instance.
+_LANDMARKER_LOCK = threading.Lock()
+
+
 @lru_cache(maxsize=1)
 def _landmarker() -> vision.FaceLandmarker:
     options = vision.FaceLandmarkerOptions(
@@ -472,7 +478,8 @@ def _detect_largest_face(image_rgb: np.ndarray) -> np.ndarray | None:
     """(N, 2) pixel-coordinate landmarks of the largest detected face, or
     None if there isn't one. Largest by bounding-box area, on the assumption
     this is a single-subject selfie."""
-    result = _landmarker().detect(Image(image_format=ImageFormat.SRGB, data=image_rgb))
+    with _LANDMARKER_LOCK:
+        result = _landmarker().detect(Image(image_format=ImageFormat.SRGB, data=image_rgb))
     if not result.face_landmarks:
         return None
 

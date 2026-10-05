@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 from typing import Literal
 from uuid import uuid4
 
@@ -30,6 +31,17 @@ _MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB — generous for a phone camera se
 # this leaves wide headroom while stopping one patch from swallowing the
 # whole photo, background included.
 _MAX_PATCH_HALF_SIZE_RATIO = 0.25
+
+# The scan handlers are plain `def`, so FastAPI runs them on its threadpool
+# and the event loop stays free while a scan waits on Anthropic or Postgres
+# (as `async def` handlers calling those blocking clients, one scan's
+# multi-second paragraph call used to stall every other request on the
+# server). That threadpool would also let many scans decode full-resolution
+# photos at once, so this lock keeps it to one photo's working set at a
+# time - the same peak memory as before. Decode + sampling takes ~0.1-0.3s,
+# so serializing just that part costs little; the slow I/O runs outside it.
+# Could become a BoundedSemaphore(n) once the host's memory headroom is known.
+_IMAGE_PIPELINE_LOCK = threading.Lock()
 
 _SAMPLE_ERROR_MESSAGES: dict[str, str] = {
     "no_face_detected": "We couldn't find a face in that photo. Try again with your face centered and well-lit.",
@@ -94,8 +106,8 @@ class LowConfidenceDetail(BaseModel):
     image: ScanImage
 
 
-async def _read_and_decode_photo(photo: UploadFile) -> np.ndarray:
-    """Validate, read, and decode an upload into a BGR array.
+def _read_upload(photo: UploadFile) -> bytes:
+    """Validate and read an upload's raw bytes.
 
     Never retains the uploaded photo beyond the caller's request — nothing
     here writes it to disk or a database (see CLAUDE.md's retention rule).
@@ -103,12 +115,15 @@ async def _read_and_decode_photo(photo: UploadFile) -> np.ndarray:
     if photo.content_type and not photo.content_type.startswith("image/"):
         raise HTTPException(status_code=422, detail="Please upload an image file.")
 
-    contents = await photo.read()
+    contents = photo.file.read()
     if not contents:
         raise HTTPException(status_code=422, detail="Please upload an image file.")
     if len(contents) > _MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=422, detail="That photo is too large (max 10MB). Try a smaller photo.")
+    return contents
 
+
+def _decode_or_422(contents: bytes) -> np.ndarray:
     image_bgr = cv2.imdecode(np.frombuffer(contents, dtype=np.uint8), cv2.IMREAD_COLOR)
     if image_bgr is None:
         raise HTTPException(status_code=422, detail="We couldn't read that image. Try a different photo.")
@@ -173,7 +188,7 @@ def _low_confidence_detail(
 
 @router.post("/scan", response_model=ScanResponse)
 @limiter.limit(scan_limit_value)
-async def scan(
+def scan(
     request: Request,
     response: Response,
     background_tasks: BackgroundTasks,
@@ -184,7 +199,12 @@ async def scan(
     Never retains the uploaded photo beyond this request — nothing here
     writes it to disk or a database (see CLAUDE.md's retention rule).
     """
-    image_bgr = await _read_and_decode_photo(photo)
+    contents = _read_upload(photo)
+    with _IMAGE_PIPELINE_LOCK:
+        image_bgr = _decode_or_422(contents)
+        height, width = image_bgr.shape[:2]
+        sample = sample_skin_regions(image_bgr)
+        del image_bgr  # free the full-resolution array before releasing the lock
 
     # Called directly, not via background_tasks: FastAPI only attaches queued
     # background tasks to a successful Response, never to the response an
@@ -193,9 +213,6 @@ async def scan(
     # is itself try/except-wrapped and timeout-bounded, so this stays cheap.
     log_event("scan_started")
 
-    height, width = image_bgr.shape[:2]
-
-    sample = sample_skin_regions(image_bgr)
     if not sample.success:
         if sample.error in ("patch_clipped", "face_out_of_frame"):
             assert sample.anchors is not None  # both reasons always carry anchors
@@ -247,7 +264,7 @@ async def scan(
 
 @router.post("/scan/manual", response_model=ScanResponse)
 @limiter.limit(scan_limit_value)
-async def scan_manual(
+def scan_manual(
     request: Request,
     response: Response,
     background_tasks: BackgroundTasks,
@@ -269,35 +286,38 @@ async def scan_manual(
     result gets the same lighting correction /scan applies - the same boxes
     on the same photo must classify the same way through either endpoint.
     """
-    image_bgr = await _read_and_decode_photo(photo)
-    height, width = image_bgr.shape[:2]
+    contents = _read_upload(photo)
+    with _IMAGE_PIPELINE_LOCK:
+        image_bgr = _decode_or_422(contents)
+        height, width = image_bgr.shape[:2]
 
-    coords = {
-        "forehead": (forehead_x, forehead_y),
-        "left_cheek": (left_cheek_x, left_cheek_y),
-        "right_cheek": (right_cheek_x, right_cheek_y),
-    }
-    form_values = (forehead_x, forehead_y, left_cheek_x, left_cheek_y, right_cheek_x, right_cheek_y, patch_half_size)
-    # isfinite first: NaN compares False against everything, so it would
-    # slip through the range checks below and crash patch sampling.
-    if (
-        not all(math.isfinite(v) for v in form_values)
-        or patch_half_size <= 0
-        or patch_half_size > min(width, height) * _MAX_PATCH_HALF_SIZE_RATIO
-        or any(not (0 <= x <= width and 0 <= y <= height) for x, y in coords.values())
-    ):
-        raise HTTPException(status_code=400, detail="Those patch positions are out of bounds for this image.")
+        coords = {
+            "forehead": (forehead_x, forehead_y),
+            "left_cheek": (left_cheek_x, left_cheek_y),
+            "right_cheek": (right_cheek_x, right_cheek_y),
+        }
+        form_values = (forehead_x, forehead_y, left_cheek_x, left_cheek_y, right_cheek_x, right_cheek_y, patch_half_size)
+        # isfinite first: NaN compares False against everything, so it would
+        # slip through the range checks below and crash patch sampling.
+        if (
+            not all(math.isfinite(v) for v in form_values)
+            or patch_half_size <= 0
+            or patch_half_size > min(width, height) * _MAX_PATCH_HALF_SIZE_RATIO
+            or any(not (0 <= x <= width and 0 <= y <= height) for x, y in coords.values())
+        ):
+            raise HTTPException(status_code=400, detail="Those patch positions are out of bounds for this image.")
 
-    anchors = AnchorPoints(
-        forehead=np.array([forehead_x, forehead_y]),
-        left_cheek=np.array([left_cheek_x, left_cheek_y]),
-        right_cheek=np.array([right_cheek_x, right_cheek_y]),
-        patch_half_size=patch_half_size,
-    )
+        anchors = AnchorPoints(
+            forehead=np.array([forehead_x, forehead_y]),
+            left_cheek=np.array([left_cheek_x, left_cheek_y]),
+            right_cheek=np.array([right_cheek_x, right_cheek_y]),
+            patch_half_size=patch_half_size,
+        )
+        sample = sample_skin_regions(image_bgr, anchors=anchors)
+        del image_bgr  # free the full-resolution array before releasing the lock
 
     log_event("scan_manual_started")
 
-    sample = sample_skin_regions(image_bgr, anchors=anchors)
     if not sample.success:
         if sample.error == "patch_clipped":
             log_event("scan_low_confidence", {"reason": "patch_clipped", "manual": True})
@@ -345,7 +365,7 @@ async def scan_manual(
 
 
 @router.post("/scans/{scan_id}/retake", response_model=ScanResponse)
-async def retake_scan(
+def retake_scan(
     background_tasks: BackgroundTasks, scan_id: str, photo: UploadFile = File(...)
 ) -> ScanResponse:
     """Re-run the full pipeline against a new photo for a paid scan's one
@@ -370,10 +390,14 @@ async def retake_scan(
     if row.retake_used:
         raise HTTPException(status_code=409, detail="You've already used your free retake for this scan.")
 
-    image_bgr = await _read_and_decode_photo(photo)
+    contents = _read_upload(photo)
+    with _IMAGE_PIPELINE_LOCK:
+        image_bgr = _decode_or_422(contents)
+        sample = sample_skin_regions(image_bgr)
+        del image_bgr  # free the full-resolution array before releasing the lock
+
     log_event("retake_started", {"scan_id": scan_id})
 
-    sample = sample_skin_regions(image_bgr)
     if not sample.success:
         if sample.error in _RETAKE_ERROR_MESSAGES:
             log_event("scan_low_confidence", {"reason": sample.error, "retake": True})

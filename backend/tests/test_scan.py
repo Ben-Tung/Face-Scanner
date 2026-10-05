@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+import time
 from pathlib import Path
 
 import cv2
@@ -346,6 +348,62 @@ def test_scan_reports_structured_detail_for_face_out_of_frame(monkeypatch):
     assert detail["patches"]["forehead"] == {"x": -5.0, "y": 80.0}
     assert detail["patches"]["patch_half_size"] == 20.0
     assert detail["image"] == {"width": 640, "height": 480}
+
+
+def test_scan_does_not_block_other_requests_while_waiting_on_paragraph(monkeypatch):
+    """A scan waiting on its (blocking, multi-second) Anthropic call must
+    not stall every other request on the server. Used as a context manager,
+    TestClient runs all requests on one shared event loop - the same shape
+    as the single uvicorn process in production - so a handler that blocks
+    the loop holds up the health check below until the paragraph returns."""
+    monkeypatch.setattr(
+        scan_module,
+        "sample_skin_regions",
+        lambda image_bgr, anchors=None: SkinSampleResult(
+            success=True,
+            forehead_rgb=(216, 165, 152),
+            left_cheek_rgb=(208, 158, 145),
+            right_cheek_rgb=(222, 170, 158),
+            anchors=AnchorPoints(
+                forehead=np.array([30.0, 15.0]),
+                left_cheek=np.array([15.0, 40.0]),
+                right_cheek=np.array([45.0, 40.0]),
+                patch_half_size=8.0,
+            ),
+        ),
+    )
+    paragraph_entered = threading.Event()
+    release_paragraph = threading.Event()
+
+    def _slow_paragraph(*args, **kwargs):
+        paragraph_entered.set()
+        release_paragraph.wait(timeout=5)
+        return None
+
+    monkeypatch.setattr(scan_module, "generate_paragraph", _slow_paragraph)
+
+    with TestClient(app) as shared_client:
+        scan_response = {}
+
+        def _scan():
+            scan_response["value"] = shared_client.post(
+                "/api/scan", files={"photo": ("p.jpg", _solid_jpeg_bytes((216, 165, 152)), "image/jpeg")}
+            )
+
+        scan_thread = threading.Thread(target=_scan)
+        scan_thread.start()
+        try:
+            assert paragraph_entered.wait(timeout=5), "scan never reached the paragraph call"
+            started = time.monotonic()
+            health = shared_client.get("/api/health")
+            health_seconds = time.monotonic() - started
+        finally:
+            release_paragraph.set()
+            scan_thread.join(timeout=10)
+
+    assert health.status_code == 200
+    assert health_seconds < 1.0, f"health check waited {health_seconds:.2f}s behind an in-flight scan"
+    assert scan_response["value"].status_code == 200
 
 
 def test_scan_returns_503_when_persistence_fails(monkeypatch):
