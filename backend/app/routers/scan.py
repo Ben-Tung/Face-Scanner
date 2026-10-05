@@ -197,6 +197,10 @@ async def scan(
     background_tasks.add_task(
         log_event,
         "scan_completed",
+        # depth_normalized also gates the sclera-based undertone (a*/b*)
+        # correction now, not just depth - both share the same
+        # sclera_rgb-availability gate. Split into two fields only if their
+        # reliability gates ever diverge.
         {"season": season, "scan_id": scan_id, "depth_normalized": sclera_rgb is not None},
     )
     return ScanResponse(scan_id=scan_id, season=season, swatches=swatches, paragraph=paragraph)

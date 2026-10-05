@@ -1,6 +1,17 @@
+import math
+
 import pytest
 
-from app.vision.season_classifier import classify_season, normalize_depth_lightness, rgb_to_lab
+from app.vision.season_classifier import (
+    _SCLERA_CORRECTION_CLAMP_AB,
+    _SCLERA_REFERENCE_A,
+    _SCLERA_REFERENCE_B,
+    classify_season,
+    hue_and_chroma,
+    normalize_depth_lightness,
+    normalize_undertone_ab,
+    rgb_to_lab,
+)
 
 
 def test_rgb_to_lab_matches_known_reference_values():
@@ -189,13 +200,87 @@ def test_normalize_depth_lightness_clamps_output_to_valid_lab_range():
     assert normalize_depth_lightness(5.0, 108.0) == pytest.approx(0.0)
 
 
-def test_classify_season_without_sclera_matches_raw_lightness_behavior():
+def test_normalize_undertone_ab_is_noop_at_reference_sclera():
+    assert normalize_undertone_ab(15.0, 20.0, _SCLERA_REFERENCE_A, _SCLERA_REFERENCE_B) == pytest.approx((15.0, 20.0))
+
+
+def test_normalize_undertone_ab_shifts_warmer_when_sclera_reads_cool():
+    # A sclera reading below the reference in both a*/b* signals a cool-cast
+    # light source - skin should be corrected warmer (up) to compensate.
+    # Expressed relative to the reference constants (rather than hardcoded
+    # absolute numbers) so this test doesn't silently go stale if the
+    # reference is recalibrated again.
+    sclera_a, sclera_b = _SCLERA_REFERENCE_A - 5.0, _SCLERA_REFERENCE_B - 3.0
+    skin_a, skin_b = 10.0, 12.0
+    assert normalize_undertone_ab(skin_a, skin_b, sclera_a, sclera_b) == pytest.approx((15.0, 15.0))
+
+
+def test_normalize_undertone_ab_shifts_cooler_when_sclera_reads_warm():
+    # A sclera reading above the reference in both a*/b* signals a warm-cast
+    # light source (e.g. an incandescent bulb) - skin should be corrected
+    # cooler (down) to compensate. This is the case that motivated the fix.
+    sclera_a, sclera_b = _SCLERA_REFERENCE_A + 5.0, _SCLERA_REFERENCE_B + 3.0
+    skin_a, skin_b = 10.0, 12.0
+    assert normalize_undertone_ab(skin_a, skin_b, sclera_a, sclera_b) == pytest.approx((5.0, 9.0))
+
+
+def test_normalize_undertone_ab_clamps_extreme_corrections_by_magnitude():
+    # Sclera far off-reference in a lopsided/diagonal direction: raw
+    # correction is (30, 40), magnitude 50, comfortably past the clamp (20).
+    # The result must match the vector rescaled to magnitude 20 in the SAME
+    # direction - (12, 16) - not a per-axis-clamped (20, 20), which would
+    # both permit a too-large true magnitude (hypot(20, 20) ~ 28.3 > 20) and
+    # distort the cast's inferred direction (its ratio of a to b).
+    sclera_a = _SCLERA_REFERENCE_A - 30.0
+    sclera_b = _SCLERA_REFERENCE_B - 40.0
+    result = normalize_undertone_ab(0.0, 0.0, sclera_a, sclera_b)
+    assert result == pytest.approx((12.0, 16.0))
+    per_axis_clamped_result = (20.0, 20.0)
+    assert result != pytest.approx(per_axis_clamped_result)
+
+
+def test_normalize_undertone_ab_clamp_applies_to_correction_not_skin_sclera_gap():
+    # A large skin-to-sclera gap alone must NOT trigger the clamp - only the
+    # sclera's own deviation from the reference does. The gap here (skin vs.
+    # sclera) has magnitude ~49.2, comfortably past the clamp (20), but the
+    # sclera itself deviates from the reference by only a small amount, so
+    # no clamping should occur: the result should match the plain unclamped
+    # arithmetic, not a gap-clamped value.
+    skin_a, skin_b = 5.0, 60.0
+    sclera_a, sclera_b = _SCLERA_REFERENCE_A + 3.75, _SCLERA_REFERENCE_B + 3.0
+    assert math.hypot(skin_a - sclera_a, skin_b - sclera_b) > _SCLERA_CORRECTION_CLAMP_AB
+    result = normalize_undertone_ab(skin_a, skin_b, sclera_a, sclera_b)
+    expected = (skin_a + (_SCLERA_REFERENCE_A - sclera_a), skin_b + (_SCLERA_REFERENCE_B - sclera_b))
+    assert result == pytest.approx(expected)
+
+
+def test_normalize_undertone_ab_leaves_high_chroma_skin_unchanged_under_reference_lighting():
+    # The failure mode this function exists to avoid re-introducing: if the
+    # clamp bounded the skin-to-sclera gap instead of (reference - sclera),
+    # naturally warm, high-chroma skin photographed under exactly
+    # reference-quality lighting would get dragged toward neutral purely
+    # because it's naturally far more saturated than the sclera - nothing to
+    # do with lighting. sclera == reference means zero inferred lighting
+    # cast, so skin must pass through completely unchanged, no matter how
+    # large the skin-to-sclera gap is.
+    skin_a, skin_b = 45.0, 55.0
+    assert math.hypot(skin_a - _SCLERA_REFERENCE_A, skin_b - _SCLERA_REFERENCE_B) > _SCLERA_CORRECTION_CLAMP_AB
+    assert normalize_undertone_ab(skin_a, skin_b, _SCLERA_REFERENCE_A, _SCLERA_REFERENCE_B) == pytest.approx(
+        (skin_a, skin_b)
+    )
+
+
+def test_classify_season_without_sclera_matches_raw_behavior():
     result = classify_season((126, 92, 68), (126, 92, 68), (126, 92, 68), sclera_rgb=None)
 
     assert result.success is True
-    assert result.classification.depth_lightness == pytest.approx(result.classification.avg_lab[0])
-    assert result.classification.depth == "deep"
-    assert result.classification.season == "Autumn"
+    classification = result.classification
+    assert classification.depth_lightness == pytest.approx(classification.avg_lab[0])
+    raw_hue, raw_chroma = hue_and_chroma(classification.avg_lab)
+    assert classification.hue_deg == pytest.approx(raw_hue)
+    assert classification.chroma == pytest.approx(raw_chroma)
+    assert classification.depth == "deep"
+    assert classification.season == "Autumn"
 
 
 def test_classify_season_sclera_correction_flips_depth_and_season():
@@ -209,12 +294,52 @@ def test_classify_season_sclera_correction_flips_depth_and_season():
     assert raw_result.classification.depth == "deep"
     assert raw_result.classification.season == "Autumn"
 
-    corrected_result = classify_season(skin, skin, skin, sclera_rgb=(120, 110, 100))
+    # (122, 109, 102) is deliberately chosen to have a*/b* equal to
+    # (_SCLERA_REFERENCE_A, _SCLERA_REFERENCE_B) - i.e. zero inferred color
+    # cast - and differ from the reference only in L*. This isolates the
+    # depth correction this test is about: now that undertone is also
+    # corrected from the same sclera reading (normalize_undertone_ab), a
+    # sclera_rgb picked without controlling for a*/b* would also perturb
+    # undertone/clarity as a side effect unrelated to what this test checks.
+    corrected_result = classify_season(skin, skin, skin, sclera_rgb=(122, 109, 102))
     assert corrected_result.classification.depth == "light"
     assert corrected_result.classification.season == "Spring"
     # Undertone/clarity are untouched by the correction - only depth changes.
     assert corrected_result.classification.undertone == raw_result.classification.undertone
     assert corrected_result.classification.clarity == raw_result.classification.clarity
+    assert corrected_result.classification.avg_lab == raw_result.classification.avg_lab
+
+
+def test_classify_season_sclera_correction_flips_undertone_and_season():
+    # Symmetric to the depth-flip test above, on the other axis: a skin
+    # patch that reads "cool" under raw hue (49.95deg, just barely under the
+    # 50deg warm/cool threshold) should flip to "warm" once corrected
+    # against a sclera reading whose b* sits well below the reference -
+    # signaling this photo's own light source had a cool color-temperature
+    # cast that pulled the whole shot (skin included) cooler than it really
+    # is.
+    skin = (185, 150, 135)
+
+    raw_result = classify_season(skin, skin, skin)
+    assert raw_result.classification.undertone == "cool"
+    assert raw_result.classification.season == "Summer"
+
+    # (168, 161, 167) is chosen to have L* at the depth reference (so depth
+    # is left isolated/untouched, mirroring how the depth-flip test above
+    # neutralizes a*/b*) and a* at the undertone reference, with only b*
+    # shifted well below reference - the same axis a real incandescent-vs-
+    # LED color-temperature cast lands on.
+    corrected_result = classify_season(skin, skin, skin, sclera_rgb=(168, 161, 167))
+    assert corrected_result.classification.undertone == "warm"
+    assert corrected_result.classification.season == "Spring"
+    # Depth is untouched by the undertone correction - only hue/chroma
+    # change. depth_lightness has a tiny (~0.04) residual shift since this
+    # sclera's L* isn't exactly at the reference (integer RGB rounding), not
+    # because the undertone correction leaked into the depth axis.
+    assert corrected_result.classification.depth == raw_result.classification.depth
+    assert corrected_result.classification.depth_lightness == pytest.approx(
+        raw_result.classification.depth_lightness, abs=0.1
+    )
     assert corrected_result.classification.avg_lab == raw_result.classification.avg_lab
 
 
@@ -231,7 +356,10 @@ def test_classify_season_ambiguity_band_tie_break_applies_to_corrected_lightness
     assert raw_result.classification.depth == "light"  # unambiguous: above the band entirely
 
     # A moderately bright sclera pulls the corrected value down into the band.
-    corrected_result = classify_season(skin, skin, skin, sclera_rgb=(190, 185, 175))
+    # (197, 183, 175) is chosen the same way as in the depth-flip test above:
+    # a*/b* equal to the reference, so only L* differs, isolating the depth
+    # correction from the now-coupled undertone correction.
+    corrected_result = classify_season(skin, skin, skin, sclera_rgb=(197, 183, 175))
     depth_lightness = corrected_result.classification.depth_lightness
     assert abs(depth_lightness - 58.0) <= 5.0  # now inside the ambiguity band
     assert corrected_result.classification.clarity == "muted"

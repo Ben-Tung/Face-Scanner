@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Manual dev tool: run the full detect -> sample -> classify pipeline across
 every photo in the local fixture batch and print one comparison row each,
-raw vs. sclera-corrected depth. Not a unit test - the permanent, scripted
-version of the by-hand, one-photo-at-a-time comparison that originally
-surfaced the raw-L*/lighting confound this correction addresses. Use this to
-eyeball whether depth ordering across a batch matches visual judgment, and to
-tune the sclera-normalization constants in season_classifier.py and
-skin_sampling.py against a larger photo set over time.
+raw vs. sclera-corrected depth AND undertone (hue). Not a unit test - the
+permanent, scripted version of the by-hand, one-photo-at-a-time comparison
+that originally surfaced the raw-L*/lighting confound the depth correction
+addresses, extended to the analogous raw-hue/color-cast confound the
+undertone correction (normalize_undertone_ab) addresses. Use this to eyeball
+whether depth ordering and undertone agreement across a batch match visual
+judgment, and to (re)tune the sclera-normalization constants in
+season_classifier.py against a larger photo set over time - the printed
+batch-mean sclera Lab at the end is exactly what those constants are
+calibrated from.
 
 Usage:
     python scripts/classify_photo_batch.py [path/to/fixtures/dir]
@@ -38,13 +42,19 @@ def main() -> None:
         raise SystemExit(1)
 
     header = (
-        f"{'photo':14s} {'raw_L':>7s} {'sclera_L':>9s} {'depth_L':>9s} "
-        f"{'raw_depth':>10s} {'new_depth':>10s} {'season':>8s} sclera_status"
+        f"{'photo':14s} {'raw_L':>6s} {'scl_L':>6s} {'scl_a':>6s} {'scl_b':>6s} "
+        f"{'depth_L':>8s} {'raw_dep':>8s} {'new_dep':>8s} "
+        f"{'raw_hue':>8s} {'cor_hue':>8s} {'raw_und':>8s} {'cor_und':>8s} "
+        f"{'season':>7s} sclera_status"
     )
     print(header)
     print("-" * len(header))
 
     fallback_count = 0
+    sclera_l_values: list[float] = []
+    sclera_a_values: list[float] = []
+    sclera_b_values: list[float] = []
+
     for photo_path in photo_paths:
         image_bgr = cv2.imread(str(photo_path))
         if image_bgr is None:
@@ -62,14 +72,22 @@ def main() -> None:
             continue
         raw_l = raw_result.classification.avg_lab[0]
         raw_depth = raw_result.classification.depth
+        raw_hue = raw_result.classification.hue_deg
+        raw_undertone = raw_result.classification.undertone
 
         sclera_rgb = None
-        sclera_l_str = "-"
+        sclera_l_str = sclera_a_str = sclera_b_str = "-"
         sclera_status = "n/a"
         if sample.sclera is not None:
             if sample.sclera.success:
                 sclera_rgb = sample.sclera.sclera_rgb
-                sclera_l_str = f"{rgb_to_lab(sclera_rgb)[0]:.1f}"
+                sclera_l, sclera_a, sclera_b = rgb_to_lab(sclera_rgb)
+                sclera_l_str = f"{sclera_l:.1f}"
+                sclera_a_str = f"{sclera_a:.1f}"
+                sclera_b_str = f"{sclera_b:.1f}"
+                sclera_l_values.append(sclera_l)
+                sclera_a_values.append(sclera_a)
+                sclera_b_values.append(sclera_b)
                 sclera_status = "ok"
             else:
                 sclera_status = sample.sclera.error or "unreliable"
@@ -86,12 +104,26 @@ def main() -> None:
 
         classification = result.classification
         print(
-            f"{photo_path.name:14s} {raw_l:7.2f} {sclera_l_str:>9s} {classification.depth_lightness:9.2f} "
-            f"{raw_depth:>10s} {classification.depth:>10s} {classification.season:>8s} {sclera_status}"
+            f"{photo_path.name:14s} {raw_l:6.1f} {sclera_l_str:>6s} {sclera_a_str:>6s} {sclera_b_str:>6s} "
+            f"{classification.depth_lightness:8.2f} {raw_depth:>8s} {classification.depth:>8s} "
+            f"{raw_hue:8.1f} {classification.hue_deg:8.1f} {raw_undertone:>8s} {classification.undertone:>8s} "
+            f"{classification.season:>7s} {sclera_status}"
         )
 
     print("-" * len(header))
-    print(f"{fallback_count}/{len(photo_paths)} photos fell back to uncorrected L* (sclera unreliable or unreadable)")
+    print(f"{fallback_count}/{len(photo_paths)} photos fell back to uncorrected L*/a*/b* (sclera unreliable or unreadable)")
+
+    if sclera_l_values:
+        mean_l = sum(sclera_l_values) / len(sclera_l_values)
+        mean_a = sum(sclera_a_values) / len(sclera_a_values)
+        mean_b = sum(sclera_b_values) / len(sclera_b_values)
+        print(
+            f"Mean sclera Lab over {len(sclera_l_values)} successful readings: "
+            f"L*={mean_l:.2f} a*={mean_a:.2f} b*={mean_b:.2f}"
+        )
+        print("These are the calibration values for _SCLERA_REFERENCE_L / _SCLERA_REFERENCE_A / _SCLERA_REFERENCE_B in season_classifier.py.")
+    else:
+        print("No successful sclera readings in this batch - cannot compute reference constants.")
 
 
 if __name__ == "__main__":
