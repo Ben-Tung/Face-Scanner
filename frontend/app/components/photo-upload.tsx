@@ -30,12 +30,14 @@ import {
 // internals (service/version/environment) to real users.
 const SHOW_HEALTH_CHECK = process.env.NODE_ENV !== "production";
 
-const LIGHTING_TIPS = [
+const CAPTURE_TIPS = [
   "Face a window in daylight — indirect light, not direct sun on your face",
   "Turn off camera flash and skip overhead room lights",
+  "Turn off beauty mode, filters, and portrait effects",
   "Take off glasses, hats, and heavy foundation or bronzer",
   "Pull hair back off your forehead and cheeks",
   "Hold the phone at eye level, about an arm's length away",
+  "Face the camera straight on with your eyes wide open",
 ] as const;
 
 type State =
@@ -159,7 +161,7 @@ export function PhotoUpload() {
           <div className={CARD_CLASS}>
             <p className="text-sm font-medium">Before you scan</p>
             <ul className="mt-2 space-y-1.5 text-sm text-black/60 dark:text-white/60">
-              {LIGHTING_TIPS.map((tip) => (
+              {CAPTURE_TIPS.map((tip) => (
                 <li key={tip} className="flex gap-2">
                   <span aria-hidden className="text-black/30 dark:text-white/30">
                     &middot;
