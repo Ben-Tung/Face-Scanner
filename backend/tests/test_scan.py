@@ -18,6 +18,14 @@ client = TestClient(app)
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "photos"
 PHOTO_PATHS = sorted(FIXTURES_DIR.glob("*.jp*g")) if FIXTURES_DIR.exists() else []
+# Bright photos of light skin whose sampled red channel sits at the ceiling
+# (251-255), since a pinned channel reads hue warm (see
+# skin_sampling._CHANNEL_CEILING). Sample7's two clipped patches are 63-68%
+# saturated - partial, so the drag-the-boxes adjuster; Sample6 and Sample8
+# are 94-100% saturated on two or more patches - overexposed, so a plain
+# retake message (see skin_sampling._PERVASIVE_SATURATED_FRACTION).
+CHANNEL_CLIPPED_PHOTOS = {"Sample7"}
+OVEREXPOSED_PHOTOS = {"Sample6", "Sample8"}
 
 
 def _blank_jpeg_bytes() -> bytes:
@@ -54,6 +62,17 @@ def test_scan_returns_season_and_swatches_for_real_photos(photo_path: Path):
             "/api/scan",
             files={"photo": (photo_path.name, f, "image/jpeg")},
         )
+
+    if photo_path.stem in CHANNEL_CLIPPED_PHOTOS:
+        assert response.status_code == 422
+        assert response.json()["detail"]["reason"] == "patch_clipped"
+        return
+    if photo_path.stem in OVEREXPOSED_PHOTOS:
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+        assert isinstance(detail, str)
+        assert "too bright" in detail
+        return
 
     assert response.status_code == 200
     body = response.json()
@@ -174,6 +193,98 @@ def test_scan_manual_samples_at_dragged_anchors_and_normalizes_against_sclera(mo
     assert anchors.patch_half_size == 8.0
 
 
+_SCLERA_MEASUREMENT_KEYS = {
+    "max_hue_difference",
+    "color_cast",
+    "forehead_dropped",
+    "sclera_L",
+    "sclera_a",
+    "sclera_b",
+    "sclera_pixel_count",
+    "sclera_error",
+}
+_CLASSIFICATION_MEASUREMENT_KEYS = {
+    "skin_L",
+    "skin_a",
+    "skin_b",
+    "hue_deg",
+    "chroma",
+    "depth_lightness",
+    "color_corrected",
+    "depth_corrected",
+}
+
+
+def _stub_sample_with_sclera(monkeypatch, sclera_rgb: tuple[int, int, int], pixel_count: int) -> None:
+    monkeypatch.setattr(
+        scan_module,
+        "sample_skin_regions",
+        lambda image_bgr: SkinSampleResult(
+            success=True,
+            forehead_rgb=(216, 165, 152),
+            left_cheek_rgb=(208, 158, 145),
+            right_cheek_rgb=(222, 170, 158),
+            anchors=AnchorPoints(
+                forehead=np.array([30.0, 15.0]),
+                left_cheek=np.array([15.0, 40.0]),
+                right_cheek=np.array([45.0, 40.0]),
+                patch_half_size=8.0,
+            ),
+            sclera=ScleraSampleResult(success=True, sclera_rgb=sclera_rgb, pixel_count=pixel_count),
+        ),
+    )
+
+
+def _capture_events(monkeypatch) -> list[tuple[str, dict | None]]:
+    logged: list[tuple[str, dict | None]] = []
+    monkeypatch.setattr(
+        scan_module, "log_event", lambda event_type, metadata=None: logged.append((event_type, metadata))
+    )
+    return logged
+
+
+def test_scan_completed_logs_measurements_and_nothing_identifying(monkeypatch):
+    _stub_sample_with_sclera(monkeypatch, sclera_rgb=(230, 225, 220), pixel_count=812)
+    logged = _capture_events(monkeypatch)
+
+    response = client.post(
+        "/api/scan", files={"photo": ("p.jpg", _solid_jpeg_bytes((216, 165, 152)), "image/jpeg")}
+    )
+
+    assert response.status_code == 200
+    metadata = next(m for event, m in logged if event == "scan_completed")
+    assert set(metadata) == {"season", "scan_id"} | _SCLERA_MEASUREMENT_KEYS | _CLASSIFICATION_MEASUREMENT_KEYS
+    # Everything beyond the existing season/scan_id is a number, a flag, or
+    # (for a missing sclera) a short reason string - never pixels.
+    for key in _SCLERA_MEASUREMENT_KEYS | _CLASSIFICATION_MEASUREMENT_KEYS:
+        assert metadata[key] is None or isinstance(metadata[key], (int, float, bool, str)), key
+    assert metadata["sclera_pixel_count"] == 812
+    assert metadata["sclera_error"] is None
+    assert metadata["color_corrected"] is True
+    # Depth correction is off by default, so depth is read from raw skin L*.
+    assert metadata["depth_corrected"] is False
+    assert metadata["depth_lightness"] == metadata["skin_L"]
+
+
+def test_color_cast_rejection_logs_the_sclera_reading(monkeypatch):
+    # A warm-bulb sclera (cast ~24, over _MAX_COLOR_CAST_AB) through the real
+    # classifier: the rejection should carry the sclera numbers that tripped
+    # the gate, but no skin/hue/depth since nothing was classified.
+    _stub_sample_with_sclera(monkeypatch, sclera_rgb=(240, 200, 150), pixel_count=640)
+    logged = _capture_events(monkeypatch)
+
+    response = client.post(
+        "/api/scan", files={"photo": ("p.jpg", _solid_jpeg_bytes((216, 165, 152)), "image/jpeg")}
+    )
+
+    assert response.status_code == 422
+    metadata = next(m for event, m in logged if event == "scan_low_confidence")
+    assert metadata["reason"] == "color_cast"
+    assert set(metadata) == {"reason"} | _SCLERA_MEASUREMENT_KEYS
+    assert metadata["sclera_b"] == pytest.approx(30.32, abs=0.01)
+    assert metadata["sclera_pixel_count"] == 640
+
+
 def test_scan_manual_reports_patch_clipped():
     image_bgr = np.full((60, 60, 3), _bgr((200, 150, 130)), dtype=np.uint8)
     image_bgr[7:24, 22:39] = 255  # blow out the forehead patch region
@@ -195,12 +306,16 @@ def test_scan_manual_reports_patch_clipped():
 
 
 def test_scan_manual_reports_inconsistent_patches():
-    # Same three RGBs as test_season_classifier's inconsistent-patches case
-    # (max pairwise ΔH* ~16.0), laid out as three stripes in one image.
+    # Forehead and left cheek from test_season_classifier's inconsistent-
+    # patches case (ΔH* ~16.0 between those two), laid out as three stripes
+    # in one image. The right cheek there is a glare patch at R=255, which
+    # sampling now rejects as patch_clipped before the hue check runs, so
+    # it's toned down below the channel ceiling here; that pair never drove
+    # the disagreement anyway.
     photo_bytes = _striped_jpeg_bytes(
         forehead_rgb=(123, 102, 99),
         left_cheek_rgb=(193, 185, 144),
-        right_cheek_rgb=(255, 247, 227),
+        right_cheek_rgb=(240, 232, 214),
     )
     data = _manual_form_fields((50, 50), (150, 50), (250, 50), 20)
 
@@ -461,6 +576,43 @@ def test_color_cast_is_a_plain_retake_message_not_a_box_adjuster(monkeypatch, en
     assert "daylight" in detail
 
 
+@pytest.mark.parametrize("endpoint", ["/api/scan", "/api/scan/manual"])
+def test_overexposed_is_a_plain_retake_message_not_a_box_adjuster(monkeypatch, endpoint):
+    # The face is blown out across most of the boxes, so there's no usable
+    # skin to drag them onto - same plain-message treatment as color_cast.
+    monkeypatch.setattr(
+        scan_module,
+        "sample_skin_regions",
+        lambda image_bgr, anchors=None: SkinSampleResult(
+            success=False,
+            error="overexposed",
+            anchors=AnchorPoints(
+                forehead=np.array([30.0, 15.0]),
+                left_cheek=np.array([15.0, 40.0]),
+                right_cheek=np.array([45.0, 40.0]),
+                patch_half_size=8.0,
+            ),
+        ),
+    )
+    logged = _capture_events(monkeypatch)
+    data = _manual_form_fields((30, 15), (15, 40), (45, 40), 8) if endpoint.endswith("manual") else None
+
+    response = client.post(
+        endpoint,
+        files={"photo": ("p.jpg", _solid_jpeg_bytes((216, 165, 152)), "image/jpeg")},
+        data=data,
+    )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert isinstance(detail, str)
+    assert "too bright" in detail
+    assert "box" not in detail.lower()
+    low_confidence = [m for event, m in logged if event == "scan_low_confidence"]
+    assert len(low_confidence) == 1
+    assert low_confidence[0]["reason"] == "overexposed"
+
+
 def test_scan_reports_structured_detail_for_inconsistent_patches(monkeypatch):
     anchors = AnchorPoints(
         forehead=np.array([100.0, 80.0]),
@@ -482,7 +634,7 @@ def test_scan_reports_structured_detail_for_inconsistent_patches(monkeypatch):
     monkeypatch.setattr(
         scan_module,
         "classify_season",
-        lambda forehead_rgb, left_cheek_rgb, right_cheek_rgb, sclera_rgb=None: SeasonClassificationResult(
+        lambda forehead_rgb, left_cheek_rgb, right_cheek_rgb, sclera_rgb=None, **kwargs: SeasonClassificationResult(
             success=False, error="inconsistent_patches"
         ),
     )

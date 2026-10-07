@@ -69,24 +69,33 @@ def test_classify_season_autumn_warm_deep():
     assert classification.clarity == "muted"
 
 
-def test_classify_season_ambiguous_depth_high_chroma_breaks_toward_light():
+def test_classify_season_ambiguous_depth_cool_clear_breaks_toward_winter():
+    # L* 57.9 (inside the ambiguity band), hue 39.3deg (cool), chroma 34.8
+    # (clear). Winter is the clear cool season, so a tie broken on clarity
+    # lands on deep. This used to expect light/Summer - the warm side's rule
+    # (clear -> light) applied to cool skin too, inverting standard theory.
     result = classify_season((194, 120, 102), (194, 120, 102), (194, 120, 102))
 
     assert result.success is True
     classification = result.classification
+    assert classification.undertone == "cool"
     assert classification.clarity == "clear"
-    assert classification.depth == "light"
-    assert classification.season == "Summer"
+    assert classification.depth == "deep"
+    assert classification.season == "Winter"
 
 
-def test_classify_season_ambiguous_depth_low_chroma_breaks_toward_deep():
+def test_classify_season_ambiguous_depth_cool_muted_breaks_toward_summer():
+    # L* 58.0 (inside the ambiguity band), hue 40.7deg (cool), chroma 14.8
+    # (muted). Summer is the muted cool season, so the tie lands on light.
+    # This used to expect deep/Winter, the mirror image of the bug above.
     result = classify_season((165, 132, 123), (165, 132, 123), (165, 132, 123))
 
     assert result.success is True
     classification = result.classification
+    assert classification.undertone == "cool"
     assert classification.clarity == "muted"
-    assert classification.depth == "deep"
-    assert classification.season == "Winter"
+    assert classification.depth == "light"
+    assert classification.season == "Summer"
 
 
 def test_classify_season_warm_side_boundary_pair():
@@ -447,7 +456,8 @@ def test_classify_season_sclera_correction_flips_depth_and_season():
     # corrected from the same sclera reading (normalize_undertone_ab), a
     # sclera_rgb picked without controlling for a*/b* would also perturb
     # undertone/clarity as a side effect unrelated to what this test checks.
-    corrected_result = classify_season(skin, skin, skin, sclera_rgb=(124, 108, 101))
+    corrected_result = classify_season(skin, skin, skin, sclera_rgb=(124, 108, 101), correct_depth=True)
+    assert corrected_result.classification.depth_corrected is True
     assert corrected_result.classification.depth == "light"
     assert corrected_result.classification.season == "Spring"
     # Undertone/clarity are untouched by the correction - only depth changes.
@@ -479,14 +489,27 @@ def test_classify_season_sclera_correction_flips_undertone_and_season():
     assert corrected_result.classification.undertone == "warm"
     assert corrected_result.classification.season == "Spring"
     # Depth is untouched by the undertone correction - only hue/chroma
-    # change. depth_lightness has a tiny (~0.04) residual shift since this
-    # sclera's L* isn't exactly at the reference (integer RGB rounding), not
-    # because the undertone correction leaked into the depth axis.
+    # change. With depth correction on, depth_lightness would have a tiny
+    # (~0.04) residual shift since this sclera's L* isn't exactly at the
+    # reference (integer RGB rounding); by default it isn't applied at all.
     assert corrected_result.classification.depth == raw_result.classification.depth
-    assert corrected_result.classification.depth_lightness == pytest.approx(
-        raw_result.classification.depth_lightness, abs=0.1
-    )
+    assert corrected_result.classification.depth_lightness == raw_result.classification.depth_lightness
     assert corrected_result.classification.avg_lab == raw_result.classification.avg_lab
+
+
+def test_classify_season_leaves_depth_uncorrected_by_default():
+    # Same skin and dim sclera as the depth-flip test above, without
+    # correct_depth: the sclera still feeds the color-cast correction, but
+    # its L* no longer moves the depth decision (see _SCLERA_REFERENCE_L
+    # for why that's off by default).
+    skin = (150, 115, 92)
+    result = classify_season(skin, skin, skin, sclera_rgb=(124, 108, 101))
+
+    classification = result.classification
+    assert classification.depth_corrected is False
+    assert classification.depth_lightness == classification.avg_lab[0]
+    assert classification.depth == "deep"
+    assert classification.season == "Autumn"
 
 
 def test_classify_season_ambiguity_band_tie_break_applies_to_corrected_lightness():
@@ -495,21 +518,27 @@ def test_classify_season_ambiguity_band_tie_break_applies_to_corrected_lightness
     # inside it should be tie-broken by clarity, exactly like the existing
     # raw-L* ambiguity tests - proving the band applies to whichever
     # lightness was actually used for the decision, not always the raw one.
-    skin = (200, 155, 148)
+    # Warm and muted, so the tie breaks to deep - the opposite of its raw
+    # "light" reading. (The cool, muted skin this used before now breaks to
+    # light inside the band too, which would no longer prove anything.)
+    skin = (196, 160, 140)
     raw_result = classify_season(skin, skin, skin)
-    assert raw_result.classification.depth_lightness == pytest.approx(67.92, abs=0.01)
+    assert raw_result.classification.depth_lightness == pytest.approx(68.59, abs=0.01)
+    assert raw_result.classification.undertone == "warm"
     assert raw_result.classification.clarity == "muted"
     assert raw_result.classification.depth == "light"  # unambiguous: above the band entirely
 
     # A moderately bright sclera pulls the corrected value down into the band.
     # (200, 182, 175) is chosen the same way as in the depth-flip test above:
-    # a*/b* equal to the reference, so only L* differs, isolating the depth
+    # a*/b* close to the reference, so mostly L* differs, isolating the depth
     # correction from the now-coupled undertone correction.
-    corrected_result = classify_season(skin, skin, skin, sclera_rgb=(200, 182, 175))
+    corrected_result = classify_season(skin, skin, skin, sclera_rgb=(200, 182, 175), correct_depth=True)
     depth_lightness = corrected_result.classification.depth_lightness
     assert abs(depth_lightness - 58.0) <= 5.0  # now inside the ambiguity band
+    assert corrected_result.classification.undertone == "warm"
     assert corrected_result.classification.clarity == "muted"
-    assert corrected_result.classification.depth == "deep"  # muted chroma breaks the tie toward deep
+    assert corrected_result.classification.depth == "deep"  # warm + muted breaks the tie toward deep
+    assert corrected_result.classification.season == "Autumn"
 
 
 def test_classify_season_tolerates_strong_directional_lighting():

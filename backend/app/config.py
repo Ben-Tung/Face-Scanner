@@ -39,6 +39,14 @@ class Settings(BaseSettings):
     # chain shape ever changes.
     client_ip_trust_hops: int = 3
 
+    # Sclera-L*-based depth correction (season_classifier.
+    # normalize_depth_lightness). Off: on real phone selfies the shaded
+    # sclera tracks eye shape more than exposure, and the correction made
+    # one subject's depth less consistent across photos, not more - see
+    # season_classifier._SCLERA_REFERENCE_L. The a*/b* color-cast correction
+    # is unaffected and always on.
+    sclera_depth_correction: bool = False
+
     # Read here so the value is validated at startup, but nothing connects to it
     # yet — the database is wired up when the first feature needs it.
     database_url: str | None = None

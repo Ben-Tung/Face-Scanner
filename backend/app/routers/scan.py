@@ -11,13 +11,14 @@ from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Reque
 from pydantic import BaseModel
 
 from app.analytics import log_event
+from app.config import get_settings
 from app.palettes import SWATCHES_BY_SEASON
 from app.paragraph import generate_paragraph
 from app.rate_limit import limiter, scan_limit_value
 from app.scans_repo import consume_retake, create_scan, get_scan
 from app.schemas import SwatchResponse, parse_scan_id_or_404, to_swatch_responses
 from app.vision.image_decode import decode_image
-from app.vision.season_classifier import Season, SeasonClassificationResult, classify_season
+from app.vision.season_classifier import Season, SeasonClassificationResult, classify_season, rgb_to_lab
 from app.vision.skin_sampling import RGB, AnchorPoints, SkinSampleResult, sample_skin_regions
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,13 @@ _SAMPLE_ERROR_MESSAGES: dict[str, str] = {
         "That photo is too bright in places — drag the boxes below to fine-tune "
         "where we sample, or retake it in softer light."
     ),
+    # Sent as a plain-string detail, never the structured adjust-the-boxes
+    # body: the face is blown out across most of the boxes, so there's no
+    # usable skin to drag them onto.
+    "overexposed": (
+        "That photo is too bright to read your skin tone. Try again in softer, indirect "
+        "light, facing a window rather than direct sun."
+    ),
 }
 _CLASSIFY_ERROR_MESSAGES: dict[str, str] = {
     "inconsistent_patches": (
@@ -74,6 +82,7 @@ _RETAKE_ERROR_MESSAGES: dict[str, str] = {
         "Your face is too close to the edge of that photo. Try another with your face centered in the frame."
     ),
     "patch_clipped": "That photo is too bright in places. Try another in softer, indirect light.",
+    "overexposed": _SAMPLE_ERROR_MESSAGES["overexposed"],
     "inconsistent_patches": (
         "We got mixed color readings from your forehead and cheeks — usually hair, a shadow, "
         "or a bright reflection. Try another photo with your hair pulled back, in even light."
@@ -161,20 +170,62 @@ def _sclera_rgb(sample: SkinSampleResult) -> RGB | None:
     return sample.sclera.sclera_rgb if sample.sclera is not None and sample.sclera.success else None
 
 
-def _classification_metadata(result: SeasonClassificationResult) -> dict:
-    """Event metadata carrying the measurements this scan was judged on -
-    cross-patch ΔH*, the lighting's color cast, and whether a shaded
-    forehead was dropped - so real-world values can be compared against
-    the classifier's thresholds over time."""
+def _classify(sample: SkinSampleResult) -> SeasonClassificationResult:
+    """Classify a successful sample with the same lighting corrections on
+    every endpoint, so the same boxes on the same photo land on the same
+    season whichever path produced them."""
+    return classify_season(
+        sample.forehead_rgb,
+        sample.left_cheek_rgb,
+        sample.right_cheek_rgb,
+        sclera_rgb=_sclera_rgb(sample),
+        correct_depth=get_settings().sclera_depth_correction,
+    )
+
+
+def _scan_measurements(sample: SkinSampleResult, result: SeasonClassificationResult) -> dict:
+    """Event metadata carrying the numbers this scan was judged on, so
+    real-world values can be compared against the classifier's thresholds
+    over time: cross-patch ΔH*, the lighting's color cast, whether a shaded
+    forehead was dropped, the sclera reading itself, and - on success - the
+    skin color and the hue/chroma/depth the season was decided from.
+
+    Numbers, flags and short reason strings only - never pixels, and
+    nothing that identifies the person."""
 
     def _rounded(value: float | None) -> float | None:
         return round(value, 2) if value is not None else None
 
-    return {
+    sclera = sample.sclera
+    sclera_rgb = _sclera_rgb(sample)
+    sclera_lab = rgb_to_lab(sclera_rgb) if sclera_rgb is not None else (None, None, None)
+    measurements = {
         "max_hue_difference": _rounded(result.max_hue_difference),
         "color_cast": _rounded(result.color_cast),
         "forehead_dropped": result.forehead_dropped,
+        "sclera_L": _rounded(sclera_lab[0]),
+        "sclera_a": _rounded(sclera_lab[1]),
+        "sclera_b": _rounded(sclera_lab[2]),
+        "sclera_pixel_count": sclera.pixel_count if sclera is not None else None,
+        "sclera_error": sclera.error if sclera is not None else None,
     }
+
+    classification = result.classification
+    if classification is not None:
+        measurements |= {
+            "skin_L": _rounded(classification.avg_lab[0]),
+            "skin_a": _rounded(classification.avg_lab[1]),
+            "skin_b": _rounded(classification.avg_lab[2]),
+            "hue_deg": _rounded(classification.hue_deg),
+            "chroma": _rounded(classification.chroma),
+            "depth_lightness": _rounded(classification.depth_lightness),
+            # Replaces depth_normalized, which meant "a sclera reading was
+            # used" back when it gated both corrections; older rows'
+            # depth_normalized equals color_corrected.
+            "color_corrected": sclera_rgb is not None,
+            "depth_corrected": classification.depth_corrected,
+        }
+    return measurements
 
 
 def _patch_anchors_payload(anchors: AnchorPoints) -> PatchAnchorsPayload:
@@ -238,12 +289,13 @@ def scan(
                     sample.error, _SAMPLE_ERROR_MESSAGES[sample.error], sample.anchors, width, height
                 ),
             )
+        if sample.error == "overexposed":
+            log_event("scan_low_confidence", {"reason": "overexposed"})
         raise HTTPException(status_code=422, detail=_SAMPLE_ERROR_MESSAGES[sample.error])
 
-    sclera_rgb = _sclera_rgb(sample)
-    result = classify_season(sample.forehead_rgb, sample.left_cheek_rgb, sample.right_cheek_rgb, sclera_rgb=sclera_rgb)
+    result = _classify(sample)
     if not result.success:
-        log_event("scan_low_confidence", {"reason": result.error, **_classification_metadata(result)})
+        log_event("scan_low_confidence", {"reason": result.error, **_scan_measurements(sample, result)})
         if result.error == "color_cast":
             raise HTTPException(status_code=422, detail=_CLASSIFY_ERROR_MESSAGES["color_cast"])
         assert sample.anchors is not None  # sampling succeeded, so anchors are always set
@@ -265,16 +317,7 @@ def scan(
     background_tasks.add_task(
         log_event,
         "scan_completed",
-        # depth_normalized also gates the sclera-based undertone (a*/b*)
-        # correction now, not just depth - both share the same
-        # sclera_rgb-availability gate. Split into two fields only if their
-        # reliability gates ever diverge.
-        {
-            "season": season,
-            "scan_id": scan_id,
-            "depth_normalized": sclera_rgb is not None,
-            **_classification_metadata(result),
-        },
+        {"season": season, "scan_id": scan_id, **_scan_measurements(sample, result)},
     )
     return ScanResponse(scan_id=scan_id, season=season, swatches=swatches, paragraph=paragraph)
 
@@ -344,18 +387,19 @@ def scan_manual(
                     "patch_clipped", _SAMPLE_ERROR_MESSAGES["patch_clipped"], anchors, width, height
                 ),
             )
+        if sample.error == "overexposed":
+            log_event("scan_low_confidence", {"reason": "overexposed", "manual": True})
         # face_out_of_frame is unreachable in practice here: the bounds check
         # above guarantees every patch overlaps the image by at least one
         # pixel, which is all sample_patch_rgb needs to return a value. Kept
         # only for defensive completeness.
         raise HTTPException(status_code=422, detail=_SAMPLE_ERROR_MESSAGES[sample.error])
 
-    sclera_rgb = _sclera_rgb(sample)
-    result = classify_season(sample.forehead_rgb, sample.left_cheek_rgb, sample.right_cheek_rgb, sclera_rgb=sclera_rgb)
+    result = _classify(sample)
     if not result.success:
         log_event(
             "scan_low_confidence",
-            {"reason": result.error, "manual": True, **_classification_metadata(result)},
+            {"reason": result.error, "manual": True, **_scan_measurements(sample, result)},
         )
         if result.error == "color_cast":
             raise HTTPException(status_code=422, detail=_CLASSIFY_ERROR_MESSAGES["color_cast"])
@@ -373,12 +417,7 @@ def scan_manual(
     background_tasks.add_task(
         log_event,
         "scan_manual_completed",
-        {
-            "season": season,
-            "scan_id": scan_id,
-            "depth_normalized": sclera_rgb is not None,
-            **_classification_metadata(result),
-        },
+        {"season": season, "scan_id": scan_id, **_scan_measurements(sample, result)},
     )
     return ScanResponse(scan_id=scan_id, season=season, swatches=swatches, paragraph=paragraph)
 
@@ -423,12 +462,11 @@ def retake_scan(
             raise HTTPException(status_code=422, detail=_RETAKE_ERROR_MESSAGES[sample.error])
         raise HTTPException(status_code=422, detail=_SAMPLE_ERROR_MESSAGES[sample.error])
 
-    sclera_rgb = _sclera_rgb(sample)
-    result = classify_season(sample.forehead_rgb, sample.left_cheek_rgb, sample.right_cheek_rgb, sclera_rgb=sclera_rgb)
+    result = _classify(sample)
     if not result.success:
         log_event(
             "scan_low_confidence",
-            {"reason": result.error, "retake": True, **_classification_metadata(result)},
+            {"reason": result.error, "retake": True, **_scan_measurements(sample, result)},
         )
         raise HTTPException(status_code=422, detail=_RETAKE_ERROR_MESSAGES[result.error])
 
@@ -449,6 +487,6 @@ def retake_scan(
     background_tasks.add_task(
         log_event,
         "retake_completed",
-        {"season": season, "scan_id": scan_id, **_classification_metadata(result)},
+        {"season": season, "scan_id": scan_id, **_scan_measurements(sample, result)},
     )
     return ScanResponse(scan_id=scan_id, season=season, swatches=swatches, paragraph=paragraph)

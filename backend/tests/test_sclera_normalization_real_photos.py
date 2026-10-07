@@ -14,6 +14,13 @@ from backend/scripts/download_models.sh. Skips cleanly when either is
 missing. Individual pairwise checks additionally skip if either named sample
 isn't present, or if sclera correction wasn't actually applied to both (a
 raw-L*-fallback photo can't test the correction itself).
+
+The correction is off in production by default (see
+season_classifier._SCLERA_REFERENCE_L); these checks turn it on explicitly
+so the kept code stays covered for whenever it's recalibrated. Pairs
+involving Sample6/7/8 skip since those photos are now rejected as
+patch_clipped or overexposed (a channel at the ceiling - see
+skin_sampling._CHANNEL_CEILING).
 """
 
 from __future__ import annotations
@@ -53,7 +60,11 @@ def _classify_corrected(photo_path: Path) -> SeasonClassification | None:
     if not sample.success or sample.sclera is None or not sample.sclera.success:
         return None
     result = classify_season(
-        sample.forehead_rgb, sample.left_cheek_rgb, sample.right_cheek_rgb, sclera_rgb=sample.sclera.sclera_rgb
+        sample.forehead_rgb,
+        sample.left_cheek_rgb,
+        sample.right_cheek_rgb,
+        sclera_rgb=sample.sclera.sclera_rgb,
+        correct_depth=True,
     )
     if not result.success:
         return None

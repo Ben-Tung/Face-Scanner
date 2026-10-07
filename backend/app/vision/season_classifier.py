@@ -93,6 +93,16 @@ _SHADED_FOREHEAD_L_GAP = 11.0
 # evenly-lit photo whose sclera reads ~22 above the reference, clamped down
 # to the +-20 cap) rather than sitting comfortably above every observed
 # correction - worth widening (~22-25) next time this gets recalibrated.
+#
+# Off by default (classify_season's correct_depth, driven by the
+# SCLERA_DEPTH_CORRECTION setting). On real phone selfies the sclera sits in
+# the shade of the lid and brow, so its L* tracks eye shape and shading
+# more than exposure: one subject's six selfies read sclera L* 41-55 against
+# this reference, which was averaged mostly from studio-style stock
+# portraits. The correction hit the clamp, pushed that subject's depth to
+# 88-100, and widened the spread across their photos (14.8 -> 19.4) instead
+# of narrowing it. Kept, not deleted, so it can be re-enabled once
+# recalibrated against phone selfies.
 _SCLERA_REFERENCE_L = 67.0
 _SCLERA_CORRECTION_CLAMP_L = 20.0
 
@@ -149,6 +159,17 @@ _SEASON_BY_UNDERTONE_AND_DEPTH: dict[tuple[Undertone, Depth], Season] = {
     ("cool", "deep"): "Winter",
 }
 
+# Depth when lightness falls inside _DEPTH_AMBIGUITY_BAND, broken on clarity.
+# Spring and Winter are the clear seasons, Autumn and Summer the muted ones,
+# so the same clarity points to opposite depths on each side of the
+# undertone split.
+_DEPTH_BY_UNDERTONE_AND_CLARITY: dict[tuple[Undertone, Clarity], Depth] = {
+    ("warm", "clear"): "light",  # Spring
+    ("warm", "muted"): "deep",  # Autumn
+    ("cool", "clear"): "deep",  # Winter
+    ("cool", "muted"): "light",  # Summer
+}
+
 
 ClassificationFailureReason = Literal["inconsistent_patches", "color_cast"]
 
@@ -169,11 +190,14 @@ class SeasonClassification:
     # raw, uncorrected average.
     hue_deg: float
     chroma: float
-    # The lightness value actually used for the depth decision: raw avg_lab[0]
-    # when no sclera reading was available, sclera-normalized otherwise (see
-    # normalize_depth_lightness). avg_lab itself always stays the raw,
+    # The lightness value actually used for the depth decision: sclera-
+    # normalized (see normalize_depth_lightness) only when depth_corrected,
+    # raw avg_lab[0] otherwise. avg_lab itself always stays the raw,
     # uncorrected average.
     depth_lightness: float
+    # Whether depth_lightness was sclera-normalized: correct_depth was on
+    # AND a sclera reading was available.
+    depth_corrected: bool = False
 
 
 @dataclass(frozen=True)
@@ -358,6 +382,8 @@ def classify_season(
     left_cheek_rgb: RGB,
     right_cheek_rgb: RGB,
     sclera_rgb: RGB | None = None,
+    *,
+    correct_depth: bool = False,
 ) -> SeasonClassificationResult:
     """Classify a face's color season from three sampled skin-patch RGBs.
 
@@ -376,15 +402,18 @@ def classify_season(
     or hat brim - which is left out of the average (but not out of the hue
     check; see `_SHADED_FOREHEAD_L_GAP`).
 
-    `sclera_rgb`, when provided, normalizes both the depth decision
-    (`normalize_depth_lightness`) and the undertone/clarity decision
-    (`normalize_undertone_ab`) against this photo's own lighting — see those
-    functions. Both fall back to the raw averaged Lab when no sclera reading
-    is available. The cross-patch hue check above runs on each raw patch's
-    own Lab, so it's unaffected either way: a uniform color cast shifts all
-    three patches together and doesn't change their agreement with each
-    other, which is exactly why that check can't catch it and a separate
-    sclera-based correction is needed.
+    `sclera_rgb`, when provided, normalizes the undertone/clarity decision
+    (`normalize_undertone_ab`) against this photo's own lighting, and the
+    depth decision too (`normalize_depth_lightness`) when `correct_depth` is
+    on - off by default, see `_SCLERA_REFERENCE_L`. Both fall back to the raw
+    averaged Lab when no sclera reading is available. The cross-patch hue
+    check above runs on each raw patch's own Lab, so it's unaffected either
+    way: a uniform color cast shifts all three patches together and doesn't
+    change their agreement with each other, which is exactly why that check
+    can't catch it and a separate sclera-based correction is needed.
+
+    Inside `_DEPTH_AMBIGUITY_BAND`, depth is broken on clarity per undertone
+    (see `_DEPTH_BY_UNDERTONE_AND_CLARITY`).
 
     A cast too strong to correct (see `sclera_color_cast`) fails as
     `color_cast`, checked before the hue check: dragging patches can fix
@@ -412,16 +441,17 @@ def classify_season(
     if sclera_lab is not None:
         corrected_a, corrected_b = normalize_undertone_ab(avg_lab[1], avg_lab[2], sclera_lab[1], sclera_lab[2])
         hue_deg, chroma = hue_and_chroma((avg_lab[0], corrected_a, corrected_b))
-        depth_lightness = normalize_depth_lightness(avg_lab[0], sclera_lab[0])
     else:
         hue_deg, chroma = hue_and_chroma(avg_lab)
-        depth_lightness = avg_lab[0]
+
+    depth_corrected = correct_depth and sclera_lab is not None
+    depth_lightness = normalize_depth_lightness(avg_lab[0], sclera_lab[0]) if depth_corrected else avg_lab[0]
 
     undertone: Undertone = "warm" if hue_deg >= _HUE_WARM_COOL_THRESHOLD_DEG else "cool"
     clarity: Clarity = "clear" if chroma >= _CHROMA_CLEAR_MUTED_THRESHOLD else "muted"
 
     if abs(depth_lightness - _DEPTH_LIGHT_DEEP_THRESHOLD_L) <= _DEPTH_AMBIGUITY_BAND:
-        depth: Depth = "light" if clarity == "clear" else "deep"
+        depth: Depth = _DEPTH_BY_UNDERTONE_AND_CLARITY[(undertone, clarity)]
     else:
         depth = "light" if depth_lightness >= _DEPTH_LIGHT_DEEP_THRESHOLD_L else "deep"
 
@@ -436,5 +466,6 @@ def classify_season(
         hue_deg=hue_deg,
         chroma=chroma,
         depth_lightness=depth_lightness,
+        depth_corrected=depth_corrected,
     )
     return SeasonClassificationResult(success=True, classification=classification, **measurements)

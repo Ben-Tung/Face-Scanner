@@ -4,6 +4,9 @@ real photo file and print the result. Not a unit test — skin_sampling.py's
 and season_classifier.py's pytest suites cover those with deterministic
 synthetic inputs. This script is for eyeballing behavior on an actual photo.
 
+Follows the SCLERA_DEPTH_CORRECTION setting like production (off by
+default); run as SCLERA_DEPTH_CORRECTION=true to see sclera-corrected depth.
+
 Usage:
     python scripts/classify_photo.py path/to/photo.jpg
 """
@@ -15,6 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from app.config import get_settings
 from app.vision.image_decode import decode_image
 from app.vision.season_classifier import _HUE_DIFFERENCE_THRESHOLD, classify_season, hue_and_chroma, rgb_to_lab
 from app.vision.skin_sampling import sample_skin_regions
@@ -54,12 +58,18 @@ def main() -> None:
     if sample.sclera is None:
         print("sclera       n/a (no landmark array reached this call)")
     elif not sample.sclera.success:
-        print(f"sclera       unreliable: {sample.sclera.error} -> falling back to uncorrected L*")
+        print(f"sclera       unreliable: {sample.sclera.error} -> falling back to uncorrected color")
     else:
         sclera_rgb = sample.sclera.sclera_rgb
         _print_patch("sclera", sclera_rgb)
 
-    result = classify_season(sample.forehead_rgb, sample.left_cheek_rgb, sample.right_cheek_rgb, sclera_rgb=sclera_rgb)
+    result = classify_season(
+        sample.forehead_rgb,
+        sample.left_cheek_rgb,
+        sample.right_cheek_rgb,
+        sclera_rgb=sclera_rgb,
+        correct_depth=get_settings().sclera_depth_correction,
+    )
     print()
     print(f"max ΔH*        = {result.max_hue_difference:.2f}  (inconsistent_patches above {_HUE_DIFFERENCE_THRESHOLD})")
     if not result.success:
@@ -79,7 +89,10 @@ def main() -> None:
     )
     print(f"hue_deg        = {classification.hue_deg:.2f}")
     print(f"chroma         = {classification.chroma:.2f}")
-    print(f"depth_lightness = {classification.depth_lightness:.2f}  (raw avg_lab L* = {classification.avg_lab[0]:.2f})")
+    print(
+        f"depth_lightness = {classification.depth_lightness:.2f}  (raw avg_lab L* = {classification.avg_lab[0]:.2f}, "
+        f"depth_corrected={classification.depth_corrected})"
+    )
 
 
 if __name__ == "__main__":

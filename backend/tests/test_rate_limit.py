@@ -66,7 +66,7 @@ def _stub_successful_pipeline(monkeypatch) -> None:
     monkeypatch.setattr(
         scan_module,
         "classify_season",
-        lambda forehead_rgb, left_cheek_rgb, right_cheek_rgb, sclera_rgb=None: SeasonClassificationResult(
+        lambda forehead_rgb, left_cheek_rgb, right_cheek_rgb, sclera_rgb=None, **kwargs: SeasonClassificationResult(
             success=True, classification=classification
         ),
     )

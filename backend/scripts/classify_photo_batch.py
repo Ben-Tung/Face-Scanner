@@ -12,6 +12,10 @@ season_classifier.py against a larger photo set over time - the printed
 batch-mean sclera Lab at the end is exactly what those constants are
 calibrated from.
 
+Depth is sclera-corrected only when the SCLERA_DEPTH_CORRECTION setting is
+on (off by default, matching production), so new_dep equals raw_dep unless
+you run it as SCLERA_DEPTH_CORRECTION=true to evaluate that correction.
+
 Usage:
     python scripts/classify_photo_batch.py [path/to/fixtures/dir]
 
@@ -26,6 +30,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from app.config import get_settings
 from app.vision.image_decode import decode_image
 from app.vision.season_classifier import classify_season, rgb_to_lab
 from app.vision.skin_sampling import sample_skin_regions
@@ -102,7 +107,11 @@ def main() -> None:
             fallback_count += 1
 
         result = classify_season(
-            sample.forehead_rgb, sample.left_cheek_rgb, sample.right_cheek_rgb, sclera_rgb=sclera_rgb
+            sample.forehead_rgb,
+            sample.left_cheek_rgb,
+            sample.right_cheek_rgb,
+            sclera_rgb=sclera_rgb,
+            correct_depth=get_settings().sclera_depth_correction,
         )
         if not result.success:
             print(

@@ -7,6 +7,7 @@ import pytest
 from app.vision.skin_sampling import (
     _LEFT_EYE,
     _LEFT_IRIS,
+    _MIN_SCLERA_PIXEL_COUNT,
     _RIGHT_EYE,
     _RIGHT_IRIS,
     _connection_indices,
@@ -129,6 +130,7 @@ def test_sample_sclera_pools_both_eyes_when_both_reliable():
 
     assert result.success is True
     assert result.sclera_rgb == (235, 230, 225)
+    assert result.pixel_count >= _MIN_SCLERA_PIXEL_COUNT
 
 
 def test_sample_sclera_falls_back_to_single_eye_when_other_is_closed():
@@ -193,6 +195,7 @@ def test_sample_sclera_fails_with_insufficient_pixels_for_tiny_eyes():
 
     assert result.success is False
     assert result.error == "insufficient_pixels"
+    assert result.pixel_count < _MIN_SCLERA_PIXEL_COUNT
 
 
 def test_sample_sclera_excludes_extreme_angle_eye_but_succeeds_via_other():

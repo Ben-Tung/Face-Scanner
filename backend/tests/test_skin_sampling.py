@@ -264,6 +264,78 @@ def test_sample_at_anchors_reports_patch_clipped():
     assert result.anchors is anchors
 
 
+_SEPARATE_PATCH_ANCHORS = AnchorPoints(
+    forehead=np.array([30.0, 15.0]),
+    left_cheek=np.array([15.0, 40.0]),
+    right_cheek=np.array([45.0, 40.0]),
+    patch_half_size=8.0,
+)
+# Each anchor's patch region (y, x slices) in a 60x60 image - no overlaps.
+_PATCH_REGIONS = (
+    (slice(7, 23), slice(22, 38)),  # forehead
+    (slice(32, 48), slice(7, 23)),  # left cheek
+    (slice(32, 48), slice(37, 53)),  # right cheek
+)
+
+
+def _skin_image_with_red_at(red: int, patch_count: int) -> np.ndarray:
+    """Light skin (RGB 200, 160, 140), with the red channel of the first
+    `patch_count` patches raised to `red` and green/blue left alone."""
+    image_bgr = np.full((60, 60, 3), (140, 160, 200), dtype=np.uint8)
+    for rows, cols in _PATCH_REGIONS[:patch_count]:
+        image_bgr[rows, cols, 2] = red
+    return image_bgr
+
+
+@pytest.mark.parametrize(("red", "expected_success"), [(252, False), (249, True)])
+def test_sample_at_anchors_rejects_a_sampled_channel_at_the_ceiling(red, expected_success):
+    # Bright, light skin with only red near 255 on one patch: no
+    # all-channel-clipped pixels for patch_clipped_fraction to notice, but a
+    # red channel pinned at the ceiling compresses R:G and reads the hue
+    # warmer than it is.
+    image_bgr = _skin_image_with_red_at(red, patch_count=1)
+    anchors = _SEPARATE_PATCH_ANCHORS
+
+    result = sample_at_anchors(image_bgr, anchors)
+
+    assert patch_clipped_fraction(image_bgr[..., ::-1], anchors.forehead, anchors.patch_half_size) == 0.0
+    assert result.success is expected_success
+    if not expected_success:
+        assert result.error == "patch_clipped"
+
+
+@pytest.mark.parametrize(
+    ("saturated_patches", "expected_error"),
+    [(1, "patch_clipped"), (2, "overexposed"), (3, "overexposed")],
+)
+def test_sample_at_anchors_reports_overexposed_only_when_two_patches_are_blown(saturated_patches, expected_error):
+    # One fully saturated patch is a highlight the user can drag a box off
+    # of; two or more means the face itself is blown out, which only a
+    # retake fixes.
+    image_bgr = _skin_image_with_red_at(253, patch_count=saturated_patches)
+
+    result = sample_at_anchors(image_bgr, _SEPARATE_PATCH_ANCHORS)
+
+    assert result.success is False
+    assert result.error == expected_error
+    assert result.anchors is _SEPARATE_PATCH_ANCHORS
+
+
+def test_patch_saturated_fraction_counts_pixels_with_any_channel_at_the_ceiling():
+    image_rgb = np.full((60, 60, 3), (200, 160, 140), dtype=np.uint8)
+    rows, cols = _PATCH_REGIONS[0]
+    image_rgb[rows, 22:30, 0] = 252  # left half of the forehead patch: red only
+
+    fraction = skin_sampling.patch_saturated_fraction(
+        image_rgb, _SEPARATE_PATCH_ANCHORS.forehead, _SEPARATE_PATCH_ANCHORS.patch_half_size
+    )
+
+    assert fraction == pytest.approx(0.5)
+    assert patch_clipped_fraction(
+        image_rgb, _SEPARATE_PATCH_ANCHORS.forehead, _SEPARATE_PATCH_ANCHORS.patch_half_size
+    ) == 0.0
+
+
 def test_sample_at_anchors_reports_face_out_of_frame_for_anchor_outside_image():
     image_bgr = np.full((60, 60, 3), 150, dtype=np.uint8)
     anchors = AnchorPoints(

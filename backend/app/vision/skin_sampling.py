@@ -62,11 +62,32 @@ _MIN_PATCH_HALF_SIZE = 4  # pixels, for close-up/high-res photos
 _OUTLIER_PERCENTILE_BAND = (10, 90)  # trims shadow/highlight pixels by Lab L
 _CLIPPING_NEAR_THRESHOLD = 5  # channel value within this of 0 or 255 counts as clipped
 _CLIPPED_PIXEL_FRACTION_THRESHOLD = 0.3  # this much of a patch clipped -> unreliable
+# Any channel at or above this counts as saturated. A patch whose SAMPLED
+# (median) color reaches it is unreliable - separate from the
+# all-three-channels pixel check above: bright, light skin can saturate red
+# alone, and a red channel pinned at the ceiling compresses R:G so the
+# patch's hue reads warmer than the skin really is. Measured on the
+# fixtures, rejected patches sample red at 251-255 and the brightest
+# accepted one at 247.
+_CHANNEL_CEILING = 250
+# When at least _PERVASIVE_MIN_PATCHES patches each have this share of
+# their pixels saturated, the whole face is blown out rather than one
+# highlight, so moving the boxes can't find usable skin and it's rejected as
+# overexposed (retake) instead of patch_clipped (drag the boxes). Two
+# patches, not one: a single blown patch is usually forehead shine, which
+# dragging does fix. A patch only reads as clipped once its median channel
+# hits the ceiling - roughly half its pixels already - so the line sits
+# between "about half" and "nearly all". On the fixtures, Sample6 and
+# Sample8 read 94-100% on their clipped patches and Sample7 63-68%;
+# brightening the other fixtures 0.5-1.5 stops put 72 of 79 clipped
+# patches at 90% or more.
+_PERVASIVE_SATURATED_FRACTION = 0.8
+_PERVASIVE_MIN_PATCHES = 2
 
 # Sclera (whites of the eyes) sampling: used as a per-photo lighting reference
-# to normalize skin depth against exposure/lighting (see
-# season_classifier.normalize_depth_lightness) - raw skin L* alone is
-# confounded with each photo's own exposure. Eyes are only a few dozen pixels
+# to correct skin color for the photo's color cast (see
+# season_classifier.normalize_undertone_ab) and, when enabled, its exposure
+# (normalize_depth_lightness). Eyes are only a few dozen pixels
 # of usable sclera even in an ordinary forward-gaze selfie, so every constant
 # here is tuned toward "don't trust a bad read" over "always produce a
 # reading" - see sample_sclera's fallback-to-uncorrected-L* behavior.
@@ -92,7 +113,7 @@ _EYE_WIDTH_ASYMMETRY_MAX_RATIO = 0.5  # one eye's polygon bbox width below this 
 # profile shots, so treat it as an unvalidated placeholder
 
 RGB = tuple[int, int, int]
-SampleFailureReason = Literal["no_face_detected", "face_out_of_frame", "patch_clipped"]
+SampleFailureReason = Literal["no_face_detected", "face_out_of_frame", "patch_clipped", "overexposed"]
 ScleraFailureReason = Literal["eyes_closed", "extreme_angle", "sclera_clipped", "insufficient_pixels"]
 
 
@@ -101,6 +122,9 @@ class ScleraSampleResult:
     success: bool
     sclera_rgb: RGB | None = None
     error: ScleraFailureReason | None = None
+    # Post-trim pixels pooled across the usable eye(s): set on success and
+    # on insufficient_pixels, logged so _MIN_SCLERA_PIXEL_COUNT can be tuned.
+    pixel_count: int | None = None
 
 
 @dataclass(frozen=True)
@@ -297,10 +321,12 @@ def patch_clipped_fraction(image_rgb: np.ndarray, center: np.ndarray, half_size:
 
     A pixel only counts as clipped when ALL THREE channels sit near 0 or
     near 255 together — a genuine loss of sensor detail desaturates toward
-    black or white across every channel. A single channel near its ceiling
-    (e.g. a warm/bright but otherwise normal skin tone with a high red
-    channel and clearly lower green/blue) is a real, valid color, not a
-    clipped one, so it must not trip this check on its own.
+    black or white across every channel. Scattered pixels with one channel
+    near its ceiling (e.g. a warm/bright skin tone with a high red channel
+    and clearly lower green/blue) don't trip this check on their own; when
+    one channel is pinned for the bulk of the patch, the sampled color
+    itself lands at the ceiling and sample_at_anchors rejects it instead
+    (see _CHANNEL_CEILING).
 
     Operates on the raw (pre-trim) pixels rather than the trimmed median,
     since a majority-clipped patch's trimmed median can still land on a
@@ -317,6 +343,21 @@ def patch_clipped_fraction(image_rgb: np.ndarray, center: np.ndarray, half_size:
     near_white = np.all(pixels >= 255 - _CLIPPING_NEAR_THRESHOLD, axis=1)
     near_black = np.all(pixels <= _CLIPPING_NEAR_THRESHOLD, axis=1)
     return float((near_white | near_black).mean())
+
+
+def patch_saturated_fraction(image_rgb: np.ndarray, center: np.ndarray, half_size: float) -> float | None:
+    """Fraction of a patch's raw pixels with ANY channel at or above
+    _CHANNEL_CEILING - the looser, single-channel counterpart to
+    patch_clipped_fraction, used to tell a blown-out face from one bright
+    spot (see _PERVASIVE_SATURATED_FRACTION). Returns None if the patch
+    falls entirely outside the image, mirroring sample_patch_rgb."""
+    bounds = _patch_bounds(image_rgb.shape[:2], center, half_size)
+    if bounds is None:
+        return None
+    x0, x1, y0, y1 = bounds
+
+    pixels = image_rgb[y0:y1, x0:x1].reshape(-1, 3)
+    return float(np.any(pixels >= _CHANNEL_CEILING, axis=1).mean())
 
 
 def _sclera_mask(image_shape: tuple[int, int], eye: EyeGeometry) -> np.ndarray:
@@ -406,12 +447,13 @@ def sample_sclera(image_rgb: np.ndarray, image_lab: np.ndarray, points: np.ndarr
         return ScleraSampleResult(success=False, error=left_reason or right_reason)
 
     pooled = np.concatenate(kept_pixel_sets, axis=0)
-    if pooled.shape[0] < _MIN_SCLERA_PIXEL_COUNT:
-        return ScleraSampleResult(success=False, error="insufficient_pixels")
+    pixel_count = int(pooled.shape[0])
+    if pixel_count < _MIN_SCLERA_PIXEL_COUNT:
+        return ScleraSampleResult(success=False, error="insufficient_pixels", pixel_count=pixel_count)
 
     median_rgb = np.median(pooled, axis=0)
     sclera_rgb = (int(round(median_rgb[0])), int(round(median_rgb[1])), int(round(median_rgb[2])))
-    return ScleraSampleResult(success=True, sclera_rgb=sclera_rgb)
+    return ScleraSampleResult(success=True, sclera_rgb=sclera_rgb, pixel_count=pixel_count)
 
 
 # MediaPipe's synchronous task runner isn't safe to call from several threads
@@ -457,12 +499,18 @@ def sample_at_anchors(image_bgr: np.ndarray, anchors: AnchorPoints) -> SkinSampl
     if forehead_rgb is None or left_cheek_rgb is None or right_cheek_rgb is None:
         return SkinSampleResult(success=False, error="face_out_of_frame", anchors=anchors)
 
-    clipped_fractions = (
-        patch_clipped_fraction(image_rgb, anchors.forehead, anchors.patch_half_size),
-        patch_clipped_fraction(image_rgb, anchors.left_cheek, anchors.patch_half_size),
-        patch_clipped_fraction(image_rgb, anchors.right_cheek, anchors.patch_half_size),
-    )
+    centers = (anchors.forehead, anchors.left_cheek, anchors.right_cheek)
+    # Checked before patch_clipped: a face blown out across most of the
+    # patches needs a retake, not the drag-the-boxes adjuster.
+    saturated_fractions = [patch_saturated_fraction(image_rgb, c, anchors.patch_half_size) for c in centers]
+    pervasive = sum(f is not None and f >= _PERVASIVE_SATURATED_FRACTION for f in saturated_fractions)
+    if pervasive >= _PERVASIVE_MIN_PATCHES:
+        return SkinSampleResult(success=False, error="overexposed", anchors=anchors)
+
+    clipped_fractions = [patch_clipped_fraction(image_rgb, c, anchors.patch_half_size) for c in centers]
     if any(f is not None and f >= _CLIPPED_PIXEL_FRACTION_THRESHOLD for f in clipped_fractions):
+        return SkinSampleResult(success=False, error="patch_clipped", anchors=anchors)
+    if any(max(rgb) >= _CHANNEL_CEILING for rgb in (forehead_rgb, left_cheek_rgb, right_cheek_rgb)):
         return SkinSampleResult(success=False, error="patch_clipped", anchors=anchors)
 
     return SkinSampleResult(
